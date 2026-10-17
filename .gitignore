@@ -1,0 +1,17 @@
+node_modules/
+.muse-edge-profile/
+.muse-chrome-profile/
+.muse-profiles/
+output/
+history.json
+accounts.json
+settings.json
+.uploads/
+logs/
+*.mp4
+*.MP4
+.env
+.env.*
+dist/
+build/
+release/
