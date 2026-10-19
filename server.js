@@ -502,7 +502,7 @@ let localApiControl=null;
 const server=http.createServer(async(req,res)=>{
   const url=new URL(req.url,'http://localhost');
   if(req.method==='GET' && url.pathname==='/api/health') return respond(res,200,{ok:true,mode:'local',museConnected:museState==='ready'});
-  if(req.method==='GET' && url.pathname==='/api/version') return respond(res,200,{version:'kstudio-localdata-v51',appVersion:require('./package.json').version,dataRoot:DATA_ROOT});
+  if(req.method==='GET' && url.pathname==='/api/version') return respond(res,200,{version:'kstudio-localdata-v52',appVersion:require('./package.json').version,dataRoot:DATA_ROOT});
   if(req.method==='GET' && url.pathname==='/api/local-api/status') return respond(res,200,localApiControl?.status()||{enabled:false,listening:false,error:'API cục bộ chưa khởi động.'});
   if(req.method==='POST' && (url.pathname==='/api/local-api/reveal'||url.pathname==='/api/local-api/rotate')) {
     const origin=req.headers.origin;

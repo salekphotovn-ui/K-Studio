@@ -1,7 +1,7 @@
 $ErrorActionPreference = 'Stop'
 $project = Split-Path -Parent $MyInvocation.MyCommand.Path
 $appVersion = (Get-Content -LiteralPath (Join-Path $project 'package.json') -Raw | ConvertFrom-Json).version
-$buildVersion = 'kstudio-localdata-v51'
+$buildVersion = 'kstudio-localdata-v52'
 $url = "http://127.0.0.1:4173/?launch=$([DateTimeOffset]::Now.ToUnixTimeSeconds())"
 
 function Get-ChromeAppPath($registryPath) {

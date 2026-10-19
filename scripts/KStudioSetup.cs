@@ -2,9 +2,11 @@ using System;
 using System.Diagnostics;
 using System.IO;
 using System.IO.Compression;
+using System.Net;
 using System.Net.Sockets;
 using System.Reflection;
 using System.Runtime.InteropServices;
+using Microsoft.Win32;
 using System.Windows.Forms;
 
 internal static class KStudioSetup
@@ -28,6 +30,9 @@ internal static class KStudioSetup
                     return;
                 }
             }
+
+            var chromePath = FindChrome();
+            if (String.IsNullOrEmpty(chromePath) && !InstallChrome()) return;
 
             var answer = MessageBox.Show("Cài K Studio vào thư mục người dùng hiện tại? Tài khoản Muse và dữ liệu sẽ được lưu riêng, không nằm trong bộ cài.", "K Studio Setup", MessageBoxButtons.YesNo, MessageBoxIcon.Question);
             if (answer != DialogResult.Yes) return;
@@ -63,6 +68,69 @@ internal static class KStudioSetup
         catch (Exception error)
         {
             MessageBox.Show("Không cài được K Studio.\r\n\r\n" + error.Message, "K Studio Setup", MessageBoxButtons.OK, MessageBoxIcon.Error);
+        }
+    }
+
+    private static string FindChrome()
+    {
+        var candidates = new[]
+        {
+            Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.ProgramFiles), "Google", "Chrome", "Application", "chrome.exe"),
+            Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.ProgramFilesX86), "Google", "Chrome", "Application", "chrome.exe"),
+            Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData), "Google", "Chrome", "Application", "chrome.exe")
+        };
+        foreach (var candidate in candidates) if (File.Exists(candidate)) return candidate;
+        foreach (var hive in new[] { Registry.CurrentUser, Registry.LocalMachine })
+            foreach (var view in new[] { RegistryView.Registry64, RegistryView.Registry32 })
+                try
+                {
+                    using (var baseKey = RegistryKey.OpenBaseKey(hive.Name == "HKEY_CURRENT_USER" ? RegistryHive.CurrentUser : RegistryHive.LocalMachine, view))
+                    using (var key = baseKey.OpenSubKey(@"Software\Microsoft\Windows\CurrentVersion\App Paths\chrome.exe"))
+                    {
+                        var value = key == null ? null : key.GetValue(null) as string;
+                        if (!String.IsNullOrEmpty(value) && File.Exists(value)) return value;
+                    }
+                }
+                catch { }
+        return null;
+    }
+
+    private static bool InstallChrome()
+    {
+        var consent = MessageBox.Show("Không tìm thấy Google Chrome. K Studio cần Chrome để mở và tự thao tác Muse. Cho phép bộ cài tải Chrome chính thức từ Google và cài cho tài khoản Windows hiện tại?", "Cần Google Chrome", MessageBoxButtons.YesNo, MessageBoxIcon.Information);
+        if (consent != DialogResult.Yes) return false;
+        var installer = Path.Combine(Path.GetTempPath(), "KStudio-ChromeSetup.exe");
+        var verifyScript = Path.Combine(Path.GetTempPath(), "KStudio-VerifyChrome.ps1");
+        try
+        {
+            ServicePointManager.SecurityProtocol = SecurityProtocolType.Tls12;
+            using (var client = new WebClient()) client.DownloadFile("https://dl.google.com/chrome/install/latest/chrome_installer.exe", installer);
+            File.WriteAllText(verifyScript, @"
+param([string]$Installer)
+$signature = Get-AuthenticodeSignature -LiteralPath $Installer
+$signer = if ($signature.SignerCertificate) { $signature.SignerCertificate.GetNameInfo([System.Security.Cryptography.X509Certificates.X509NameType]::SimpleName, $false) }
+if ($signature.Status -ne 'Valid' -or $signer -ne 'Google LLC') { exit 1 }
+");
+            var powershell = Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.System), "WindowsPowerShell\\v1.0\\powershell.exe");
+            var verify = Process.Start(new ProcessStartInfo { FileName = powershell, Arguments = "-NoProfile -NonInteractive -ExecutionPolicy Bypass -File \"" + verifyScript + "\" \"" + installer + "\"", UseShellExecute = false, CreateNoWindow = true, WindowStyle = ProcessWindowStyle.Hidden });
+            verify.WaitForExit(30000);
+            if (!verify.HasExited || verify.ExitCode != 0) throw new InvalidDataException("Không xác thực được chữ ký Google của bộ cài Chrome.");
+            var install = Process.Start(new ProcessStartInfo { FileName = installer, Arguments = "/silent /install", UseShellExecute = false, CreateNoWindow = true, WindowStyle = ProcessWindowStyle.Hidden });
+            install.WaitForExit(300000);
+            if (!install.HasExited) { try { install.Kill(); } catch { } throw new TimeoutException("Cài Chrome quá thời gian chờ."); }
+            if (String.IsNullOrEmpty(FindChrome())) throw new InvalidOperationException("Bộ cài đã chạy nhưng chưa tìm thấy chrome.exe.");
+            return true;
+        }
+        catch (Exception error)
+        {
+            var open = MessageBox.Show("Không tự cài được Chrome: " + error.Message + "\r\n\r\nMở trang tải Chrome chính thức để cài thủ công, rồi chạy lại bộ cài K Studio?", "Không cài được Chrome", MessageBoxButtons.YesNo, MessageBoxIcon.Warning);
+            if (open == DialogResult.Yes) Process.Start(new ProcessStartInfo { FileName = "https://www.google.com/chrome/", UseShellExecute = true });
+            return false;
+        }
+        finally
+        {
+            try { File.Delete(installer); } catch { }
+            try { File.Delete(verifyScript); } catch { }
         }
     }
 
