@@ -3,11 +3,15 @@ const fs = require('node:fs');
 const path = require('node:path');
 const crypto = require('node:crypto');
 const os = require('node:os');
-const { spawnSync, spawn } = require('node:child_process');
+const { spawnSync, spawn, fork } = require('node:child_process');
 const { chromium } = require('playwright-core');
+const { startLocalApi, finalizeTeamOutput } = require('./local-api');
+const { cropToAspect, parseAspectRatio } = require('./media-transform');
+const { quotaSnapshot, readMuseQuota } = require('./muse-quota');
 
 const ROOT = __dirname;
-const DATA_ROOT = path.resolve(process.env.KSTUDIO_DATA_DIR || path.join(process.env.LOCALAPPDATA || path.join(os.homedir(), 'AppData', 'Local'), 'K Studio'));
+// LOCALAPPDATA may point into an isolated app sandbox instead of the user's data.
+const DATA_ROOT = path.resolve(process.env.KSTUDIO_DATA_DIR || path.join(os.homedir(), 'AppData', 'Local', 'K Studio'));
 fs.mkdirSync(DATA_ROOT,{recursive:true});
 function migrateLegacyData(){
   if(DATA_ROOT===ROOT)return;
@@ -30,20 +34,30 @@ const batches = new Map();
 const MUSE_PROFILE = path.join(DATA_ROOT, '.muse-chrome-profile');
 const CHROME_CANDIDATES = [process.env.KSTUDIO_CHROME_PATH,path.join(process.env.PROGRAMFILES||'C:\\Program Files','Google','Chrome','Application','chrome.exe'),path.join(process.env['PROGRAMFILES(X86)']||'C:\\Program Files (x86)','Google','Chrome','Application','chrome.exe'),process.env.LOCALAPPDATA&&path.join(process.env.LOCALAPPDATA,'Google','Chrome','Application','chrome.exe')].filter(Boolean);
 const CHROME_PATH = CHROME_CANDIDATES.find(candidate=>fs.existsSync(candidate));
+const MUSE_LOGIN_VIEWPORT = { width:780, height:530 };
+const MUSE_READY_VIEWPORT = { width:1160, height:740 };
 const HISTORY_FILE = path.join(DATA_ROOT, 'history.json');
 const SETTINGS_FILE = path.join(DATA_ROOT, 'settings.json');
 const ACCOUNTS_FILE = path.join(DATA_ROOT, 'accounts.json');
+const ACCOUNTS_BACKUP_FILE = path.join(DATA_ROOT, 'accounts.backup.json');
 const REFERENCE_DIR = path.join(DATA_ROOT, '.uploads', 'references');
-const DEFAULT_SETTINGS = { outputDir: path.join(DATA_ROOT, 'output'), imageWorkers: 2, videoWorkers: 2, imageTimeout: 6, videoTimeout: 12, promptSeparator: '', allowedDomainsEnabled: true, allowedDomains: 'huggingface.co', autoReservePercent: 5 };
+const DEFAULT_SETTINGS = { outputDir: path.join(DATA_ROOT, 'output'), imageWorkers: 3, videoWorkers: 5, imageTimeout: 6, videoTimeout: 12, promptSeparator: '', allowedDomainsEnabled: true, allowedDomains: 'huggingface.co', autoReservePercent: 5, imageAccountId: '', videoAccountMode: 'all' };
 const outputReservations = new Set();
 let settings = { ...DEFAULT_SETTINGS };
 try { settings = { ...settings, ...JSON.parse(fs.readFileSync(SETTINGS_FILE, 'utf8')) }; } catch {}
 let accounts = [{ id:'default', name:'Tài khoản Muse', enabled:true, primary:true, profileDir:MUSE_PROFILE, createdAt:new Date().toISOString() }];
-try { const saved=JSON.parse(fs.readFileSync(ACCOUNTS_FILE,'utf8')); if(Array.isArray(saved)&&saved.length) accounts=saved; } catch {}
+const accountSources=[ACCOUNTS_FILE,ACCOUNTS_BACKUP_FILE,path.join(ROOT,'accounts.json')].map(source=>{
+  try{const saved=JSON.parse(fs.readFileSync(source,'utf8'));return Array.isArray(saved)&&saved.length?{source,saved}:null}catch{return null}
+}).filter(Boolean).sort((a,b)=>b.saved.length-a.saved.length);
+if(accountSources.length)accounts=accountSources[0].saved;
+const initialPrimaryIndex=accounts.findIndex(account=>account.primary);
+if(initialPrimaryIndex>0)accounts.unshift(accounts.splice(initialPrimaryIndex,1)[0]);
 for(const account of accounts)account.profileDir=account.id==='default'?MUSE_PROFILE:path.join(DATA_ROOT,'.muse-profiles',account.id);
 let museContext = null;
 let musePage = null;
 let museAccountId = 'default';
+let museWindowHandle = 0;
+let museWindowWatcher = null;
 let museConnectPromise = null;
 let museState = 'disconnected';
 let museQueue = Promise.resolve();
@@ -60,10 +74,45 @@ try { for (const batch of JSON.parse(fs.readFileSync(HISTORY_FILE, 'utf8'))){
 } } catch {}
 function persistHistory() {
   const all=Array.from(batches.values()),finished=new Set(all.filter(b=>['Hoàn tất','Hoàn tất, có lỗi','Lỗi'].includes(b.status)).slice(-100).map(b=>b.id));
-  fs.writeFileSync(HISTORY_FILE,JSON.stringify(all.filter(b=>!['Hoàn tất','Hoàn tất, có lỗi','Lỗi'].includes(b.status)||finished.has(b.id)),null,2),'utf8');
+  fs.writeFileSync(HISTORY_FILE,JSON.stringify(all.filter(b=>b.externalJobId||!['Hoàn tất','Hoàn tất, có lỗi','Lỗi'].includes(b.status)||finished.has(b.id)),null,2),'utf8');
 }
 function persistSettings() { fs.writeFileSync(SETTINGS_FILE, JSON.stringify(settings, null, 2), 'utf8'); }
-function persistAccounts() { fs.writeFileSync(ACCOUNTS_FILE, JSON.stringify(accounts, null, 2), 'utf8'); }
+settings.imageWorkers=Math.max(1,Math.min(3,Number(settings.imageWorkers)||DEFAULT_SETTINGS.imageWorkers));
+settings.videoWorkers=Math.max(1,Math.min(5,Number(settings.videoWorkers)||DEFAULT_SETTINGS.videoWorkers));
+function persistAccounts() {
+  fs.mkdirSync(path.dirname(ACCOUNTS_FILE),{recursive:true});
+  const serialized=JSON.stringify(accounts,null,2);
+  const writeAtomic=file=>{
+    const tempFile=`${file}.${process.pid}.tmp`;
+    fs.writeFileSync(tempFile,serialized,'utf8');
+    fs.renameSync(tempFile,file);
+  };
+  if(fs.existsSync(ACCOUNTS_FILE)){
+    try{
+      const previous=JSON.parse(fs.readFileSync(ACCOUNTS_FILE,'utf8'));
+      if(Array.isArray(previous)&&previous.length)fs.copyFileSync(ACCOUNTS_FILE,ACCOUNTS_BACKUP_FILE);
+    }catch{}
+  }
+  writeAtomic(ACCOUNTS_FILE);
+  const legacyFile=path.join(ROOT,'accounts.json');
+  if(path.resolve(legacyFile)!==path.resolve(ACCOUNTS_FILE))try{writeAtomic(legacyFile)}catch(error){console.error('Không đồng bộ được bản tài khoản dự phòng trong thư mục K Studio:',error.message)}
+}
+persistAccounts();
+let quotaReadQueue = Promise.resolve();
+function refreshAccountQuota(page, account) {
+  const task = quotaReadQueue.then(async () => {
+    const usage = await readMuseQuota(page);
+    if (!usage) return null;
+    account.quotaUsedPct = usage.percent;
+    account.quotaObservedAt = new Date().toISOString();
+    account.quotaResetLabel = usage.resetLabel;
+    account.additionalTokensLabel = usage.additionalTokensLabel;
+    persistAccounts();
+    return usage.percent;
+  });
+  quotaReadQueue = task.catch(() => {});
+  return task;
+}
 function quotaMessage(text) {
   const value=String(text||'').toLowerCase();
   const patterns=[
@@ -80,12 +129,40 @@ function quotaMessage(text) {
   return null;
 }
 function isQuotaError(error){return error?.code==='MUSE_QUOTA';}
+function replyAfterPrompt(text,prompt){
+  const content=String(text||'').replace(/\s+/g,' '),needle=String(prompt||'').replace(/\s+/g,' ').trim();
+  if(!needle)return null;
+  const index=content.lastIndexOf(needle);
+  return index<0?null:content.slice(index+needle.length);
+}
 function checkQuotaReply(text,oldText,prompt){
-  const newer=String(text||'').replace(String(prompt||''),'');
+  const newer=replyAfterPrompt(text,prompt);
+  if(newer===null)return;
   const reason=quotaMessage(newer);
   if(reason){const error=new Error('Muse báo hết token hoặc hạn mức.');error.code='MUSE_QUOTA';error.reason=reason;throw error;}
 }
+function checkMuseGenerationFailure(text,oldText,prompt){
+  const failurePattern=/(?:something went wrong|generation failed|failed to generate|please try again later|temporarily unavailable|không thể tạo|tạo nội dung thất bại|đã xảy ra lỗi)/i;
+  const newer=replyAfterPrompt(text,prompt);
+  if(newer===null)return;
+  const failure=newer.match(failurePattern);
+  if(failure){
+    // Preserve Muse's visible explanation so the queue tells us why generation
+    // failed instead of reducing every failure to the same generic message.
+    const detail=newer.slice(failure.index,Math.min(newer.length,failure.index+300)).trim();
+    const error=new Error(`Muse báo lỗi tạo nội dung${detail?`: ${detail}`:''}. K Studio có thể thử lại trong cùng chat.`);
+    error.code='MUSE_GENERATION_FAILED';
+    throw error;
+  }
+}
 function accountAvailable(account){const blocked=Date.parse(account.quotaBlockedAt||'');return account.enabled && (!Number.isFinite(blocked)||Date.now()-blocked>=QUOTA_RECHECK_MS);}
+function accountsForType(type){
+  const enabled=accounts.filter(account=>account.enabled);
+  if(type==='Ảnh'&&settings.imageAccountId){const preferred=enabled.find(account=>account.id===settings.imageAccountId);return preferred?[preferred,...enabled.filter(account=>account.id!==preferred.id)]:enabled}
+  if(type==='Video'&&settings.videoAccountMode==='exclude-image-account'&&settings.imageAccountId)return enabled.filter(account=>account.id!==settings.imageAccountId);
+  return enabled;
+}
+function quotaCostBuffer(account,type){return type==='Video'?Math.max(4,Number(account.videoCostBufferPct)||0):Math.max(1,Number(account.imageCostBufferPct)||0)}
 function scheduleResume(){
   if(resumeTimer)clearTimeout(resumeTimer);
   const pending=Array.from(batches.values()).some(b=>b.status.startsWith('Tạm dừng')&&b.jobs.some(j=>j.status==='Trong hàng đợi'));
@@ -109,9 +186,11 @@ function museContextIsAlive() {
   } catch { return false; }
 }
 async function discardStaleMuseContext() {
+  await stopMuseWindowWatcher();
   const stale = museContext;
   museContext = null;
   musePage = null;
+  museWindowHandle = 0;
   museState = 'disconnected';
   if (stale) await stale.close().catch(() => {});
 }
@@ -138,7 +217,7 @@ function detect(prompt) {
 }
 function publicBatch(batch) {
   const root=outputRootDir();
-  return {id:batch.id,status:batch.status,workers:batch.workers,accountId:batch.accountId||'default',activeAccountId:batch.activeAccountId||null,createdAt:batch.createdAt,jobs:batch.jobs.map(j=>{let outputSize=null,outputRelativePath=null;try{if(j.outputPath){outputRelativePath=path.relative(root,path.resolve(j.outputPath));if(fs.existsSync(j.outputPath))outputSize=fs.statSync(j.outputPath).size}}catch{}const outputUrl=outputRelativePath?'/api/output/'+outputRelativePath.split(path.sep).map(encodeURIComponent).join('/'):null;return{id:j.id,prompt:j.prompt,type:j.type,status:j.status,error:j.error||null,accountId:j.accountId||null,outputPath:j.outputPath||null,outputRelativePath,outputUrl,outputSize,hasReferenceImage:Boolean(j.referenceImagePath),referenceName:j.referenceName||null,startedAt:j.startedAt||null,finishedAt:j.finishedAt||null}})};
+  return {id:batch.id,status:batch.status,workers:batch.workers,accountId:batch.accountId||'default',activeAccountId:batch.activeAccountId||null,createdAt:batch.createdAt,jobs:batch.jobs.map(j=>{let outputSize=null,outputRelativePath=null;try{if(j.outputPath){outputRelativePath=path.relative(root,path.resolve(j.outputPath));if(fs.existsSync(j.outputPath))outputSize=fs.statSync(j.outputPath).size}}catch{}const outputUrl=outputRelativePath?'/api/output/'+outputRelativePath.split(path.sep).map(encodeURIComponent).join('/'):null;return{id:j.id,prompt:j.prompt,type:j.type,status:j.status,error:j.error||null,accountId:j.accountId||null,outputPath:j.outputPath||null,outputRelativePath,outputUrl,outputSize,hasReferenceImage:Boolean(j.referenceImagePath),referenceName:j.referenceName||null,startedAt:j.startedAt||null,finishedAt:j.finishedAt||null,quotaBeforePct:j.quotaBeforePct??null,quotaAfterPct:j.quotaAfterPct??null,quotaDeltaPct:j.quotaDeltaPct??null}})};
 }
 async function runBatch(batch) {
   batch.status = 'Cần kết nối Muse';
@@ -160,26 +239,31 @@ async function connectMuse(accountId='default', hidden=false) {
         executablePath: CHROME_PATH,
         headless: false,
         // Keep the Muse login window compact so it can sit beside K Studio.
-        viewport: { width: 780, height: 530 },
-        args: ['--window-size=800,600'],
+        viewport: MUSE_LOGIN_VIEWPORT,
+        args: ['--window-size=800,600', ...(hidden ? ['--start-minimized'] : [])],
         acceptDownloads: true,
       });
       const launchedContext = museContext;
       launchedContext.on('close', () => {
         if (museContext === launchedContext) {
+          stopMuseWindowWatcher().catch(() => {});
           museContext = null;
           musePage = null;
+          museWindowHandle = 0;
           museState = 'disconnected';
         }
       });
     }
     museAccountId=accountId;
     musePage = museContext.pages()[0] || await museContext.newPage();
-    await setMuseWindowState('normal');
+    if (!hidden) await setMuseWindowState('normal');
     if(!/^https?:\/\/(www\.)?muse\.ai\//i.test(musePage.url())) await musePage.goto('https://muse.ai/', { waitUntil: 'domcontentloaded' });
     await musePage.waitForTimeout(1500);
     museState = await isMuseReady(musePage) ? 'ready' : 'login_required';
-    await setMuseWindowState(hidden && museState==='ready' ? 'minimized' : 'normal');
+    await musePage.setViewportSize(museState==='ready'?MUSE_READY_VIEWPORT:MUSE_LOGIN_VIEWPORT);
+    if (museState === 'ready') await refreshAccountQuota(musePage, account);
+    const windowState=hidden && museState==='ready' ? 'hidden' : 'normal';
+    if (!await setMuseWindowState(windowState)) throw new Error(windowState==='hidden'?'Không ẩn được cửa sổ Muse; đã dừng trước khi gửi tác vụ.':'Không hiện được cửa sổ Muse để đăng nhập.');
     return museStatus();
   })();
   try { return await museConnectPromise; }
@@ -187,67 +271,60 @@ async function connectMuse(accountId='default', hidden=false) {
 }
 async function setMuseWindowState(windowState) {
   if(!museContext) return false;
-  let browserSession;
   try {
-    browserSession=await museContext.browser().newBrowserCDPSession();
-    const {windowId}=await browserSession.send('Browser.getWindowForTarget');
-    await browserSession.send('Browser.setWindowBounds',{windowId,bounds:{windowState}});
+    const account=accounts.find(a=>a.id===museAccountId);
+    if(!account)return false;
+    const profile=museAccountId==='default'?MUSE_PROFILE:path.join(DATA_ROOT,'.muse-profiles',museAccountId);
+    if(windowState!=='hidden')await stopMuseWindowWatcher();
+    const ready=museState==='ready';
+    const result=spawnSync('powershell.exe',['-NoProfile','-NonInteractive','-ExecutionPolicy','Bypass','-File',path.join(ROOT,'muse-window.ps1'),windowState==='hidden'?'hide':'show',profile,String(museWindowHandle),'0',String(ready?1180:800),String(ready?850:600)],{windowsHide:true,encoding:'utf8',timeout:12000,maxBuffer:8192});
+    if(result.status!==0)throw new Error((result.stderr||result.error?.message||'Không đổi được trạng thái cửa sổ Muse.').trim());
+    const state=JSON.parse(result.stdout.trim());
+    if(!state.ok||Boolean(state.visible)===(windowState==='hidden'))return false;
+    museWindowHandle=state.handle;
+    if(windowState==='hidden')startMuseWindowWatcher(profile);
     return true;
-  } catch { return false; }
-  finally { if(browserSession) await browserSession.detach().catch(()=>{}); }
+  } catch(error) { console.error('Muse window:',error.message);return false; }
+}
+async function stopMuseWindowWatcher() {
+  const watcher=museWindowWatcher;
+  museWindowWatcher=null;
+  if(!watcher||watcher.child.exitCode!==null)return;
+  await new Promise(resolve=>{
+    const timer=setTimeout(resolve,1500);
+    watcher.child.once('exit',()=>{clearTimeout(timer);resolve()});
+    watcher.child.kill();
+  });
+}
+function startMuseWindowWatcher(profile) {
+  if(museWindowWatcher?.profile===profile&&museWindowWatcher.child.exitCode===null&&!museWindowWatcher.child.killed)return;
+  const child=spawn('powershell.exe',['-NoProfile','-NonInteractive','-ExecutionPolicy','Bypass','-File',path.join(ROOT,'muse-window.ps1'),'watch',profile,'0',String(process.pid)],{windowsHide:true,stdio:'ignore'});
+  museWindowWatcher={child,profile};
+  child.once('error',error=>console.error('Muse window watch:',error.message));
+  child.once('exit',code=>{if(museWindowWatcher?.child===child)museWindowWatcher=null;if(code&&code!==0)console.error('Muse window watch exited:',code)});
+  child.unref();
 }
 async function isMuseReady(page) {
   try { await page.getByRole('textbox', { name: /Message/i }).first().waitFor({state:'visible',timeout:15000}); return true; }
   catch { return false; }
 }
-async function startNewMuseConversation(page) {
-  const sideChats=page.getByText(/^Side chats$/i).first();
-  if(!await sideChats.isVisible().catch(()=>false)){
-    const toggles=[
-      page.getByRole('button',{name:/^(chats?|conversations?)$/i}),
-      page.locator('button[aria-label*="chat" i],button[title*="chat" i],a[aria-label*="chat" i],[role="button"][aria-label*="chat" i],button[aria-label*="conversation" i],[role="button"][aria-label*="conversation" i]')
-    ];
-    let opened=false;
-    for(const locator of toggles){
-      const count=await locator.count().catch(()=>0);
-      for(let i=0;i<count;i++){
-        const candidate=locator.nth(i);
-        if(await candidate.isVisible().catch(()=>false)){
-          await candidate.click({timeout:5000});
-          await sideChats.waitFor({state:'visible',timeout:5000}).catch(()=>{});
-          if(await sideChats.isVisible().catch(()=>false)){opened=true;break}
-        }
-      }
-      if(opened)break;
-    }
-  }
-  if(!await sideChats.isVisible().catch(()=>false)) throw new Error('Không mở được danh sách Side chats trên Muse; đã dừng để tránh gửi prompt vào hội thoại cũ.');
-  const previousUrl=page.url();
-  // Muse renders the Side chats heading and its + control in separate DOM branches
-  // in some layouts. Locate the visible control by its position in the same row.
-  const clicked=await sideChats.evaluate((heading)=>{
-    const visible=(el)=>{const r=el.getBoundingClientRect(),s=getComputedStyle(el);return r.width>0&&r.height>0&&s.visibility!=='hidden'&&s.display!=='none'};
-    const hr=heading.getBoundingClientRect();
-    let ancestor=heading;
-    for(let depth=0;depth<7&&ancestor;depth++,ancestor=ancestor.parentElement){
-      const controls=[...ancestor.querySelectorAll('button,[role="button"],a,[tabindex]:not([tabindex="-1"])')].filter(visible);
-      const candidates=controls.map(el=>{const r=el.getBoundingClientRect(),label=[el.getAttribute('aria-label'),el.getAttribute('title'),el.innerText,el.textContent].filter(Boolean).join(' ').replace(/\s+/g,' ').trim();return {el,label,r,dy:Math.abs((r.top+r.bottom)/2-(hr.top+hr.bottom)/2),dx:r.left-hr.right}})
-        .filter(x=>x.dy<=Math.max(24,hr.height)&&x.dx>=-4&&x.dx<180);
-      const explicit=candidates.filter(x=>/new.*side\s*chat|side\s*chat|add.*chat|create.*chat/i.test(x.label)||/^\s*[+＋]\s*$/.test(x.label));
-      const choices=explicit.length?explicit:candidates;
-      choices.sort((a,b)=>a.dx-b.dx);
-      if(choices.length){choices[0].el.click();return {ok:true,label:choices[0].label||'(icon)',depth,dx:Math.round(choices[0].dx),dy:Math.round(choices[0].dy)}}
-    }
-    return {ok:false};
-  }).catch(()=>({ok:false}));
-  if(!clicked.ok) throw new Error('Không tìm thấy nút + cạnh Side chats trên Muse; đã dừng để tránh gửi prompt vào hội thoại cũ.');
-  try { await page.waitForURL(url=>url.href!==previousUrl,{timeout:10000}); }
-  catch { throw new Error(`Đã bấm nút cạnh Side chats nhưng Muse không chuyển sang chat mới (URL vẫn ${previousUrl}); đã dừng để tránh gửi prompt vào hội thoại cũ.`); }
-  await page.getByRole('textbox',{name:/Message/i}).first().waitFor({state:'visible',timeout:15000});
-  await page.waitForTimeout(500);
-}
 function museStatus() {
-  return { state: museState, url: musePage?.url() || null, title: musePage ? 'Muse' : null, accountId:museAccountId };
+  return { state: museState, url: musePage?.url() || null, title: musePage ? 'Muse' : null, accountId:museAccountId, viewport:musePage?.viewportSize()||null };
+}
+let museLoginWatchBusy=false;
+async function watchMuseLogin() {
+  if(museLoginWatchBusy||museState!=='login_required'||!museContextIsAlive()||!musePage||musePage.isClosed())return;
+  museLoginWatchBusy=true;
+  try {
+    if(!await musePage.getByRole('textbox',{name:/Message/i}).first().isVisible().catch(()=>false))return;
+    museState='ready';
+    await musePage.setViewportSize(MUSE_READY_VIEWPORT);
+    const account=accounts.find(a=>a.id===museAccountId);
+    if(account)await refreshAccountQuota(musePage,account);
+    if(!await setMuseWindowState('hidden'))throw new Error('Không ẩn được cửa sổ Muse sau khi đăng nhập.');
+    resumePausedBatches();
+  } catch(error) { museState='error';console.error('Muse login watch:',error.message); }
+  finally { museLoginWatchBusy=false; }
 }
 function safeFilename(prompt) {
   return prompt.replace(/^\s*(ảnh|anh|video)\s*:\s*/i, '').replace(/[<>:"/\\|?*\x00-\x1f]/g, '').trim().slice(0, 90) || 'Muse result';
@@ -262,40 +339,53 @@ function outputDirFor(type) {
   return target;
 }
 function reserveOutputPath(prompt,ext,type){const dir=outputDirFor(type);let file=safeFilename(prompt)+ext,index=2,target=path.join(dir,file);while(fs.existsSync(target)||outputReservations.has(target)){file=`${safeFilename(prompt)} (${index++})${ext}`;target=path.join(dir,file)}outputReservations.add(target);return target}
-async function waitForMuseReply(page, oldText, prompt, timeoutMs = 180000) {
-  const started = Date.now();
-  let sawBusy = false;
-  while (Date.now() - started < timeoutMs) {
-    const text = await page.locator('body').innerText().catch(() => '');
-    checkQuotaReply(text,oldText,prompt);
-    const stopCount = await page.getByRole('button', { name: /Stop/i }).count().catch(() => 0);
-    if (stopCount > 0) sawBusy = true;
-    const generatedCount = await page.getByRole('button', { name: /Open generated image/i }).count().catch(() => 0);
-    const changed = text.length > oldText.length && !text.endsWith('Assistant is typing');
-    if (sawBusy && stopCount === 0 && (changed || generatedCount > 0)) return { text, generatedCount };
-    await page.waitForTimeout(1200);
-  }
-  throw new Error('Muse chưa hoàn tất trong thời gian chờ.');
+async function museResponseForPrompt(page,prompt) {
+  return page.evaluate(prompt=>{
+    const normalize=value=>String(value||'').replace(/\s+/g,' ').trim();
+    const needle=normalize(prompt);
+    const containers=[...document.querySelectorAll('[class*="max-w-3xl"]')];
+    for(const container of containers){
+      const rows=[...container.children];
+      let promptIndex=-1;
+      for(let index=0;index<rows.length;index++){
+        const text=normalize(rows[index].innerText);
+        if(text.startsWith('You:')&&text.includes(needle))promptIndex=index;
+      }
+      if(promptIndex<0)continue;
+      let end=rows.length;
+      for(let index=promptIndex+1;index<rows.length;index++)if(normalize(rows[index].innerText).startsWith('You:')){end=index;break}
+      const replies=rows.slice(promptIndex+1,end);
+      const buttons=replies.flatMap(row=>[...row.querySelectorAll('button[aria-label]')]);
+      const allImages=[...document.querySelectorAll('button[aria-label^="Open generated image"]')];
+      const allVideos=[...document.querySelectorAll('button[aria-label^="Open generated video"],button[aria-label^="Open animated video"]')];
+      const allVideoDownloads=[...document.querySelectorAll('button[aria-label="Download video"]')];
+      const image=buttons.filter(button=>allImages.includes(button)).at(-1);
+      const video=buttons.filter(button=>allVideos.includes(button)).at(-1);
+      const directVideo=buttons.filter(button=>allVideoDownloads.includes(button)).at(-1);
+      return {matched:true,replyText:replies.map(row=>row.innerText||'').join('\n').slice(0,3000),imageIndex:image?allImages.indexOf(image):-1,videoIndex:video?allVideos.indexOf(video):-1,directVideoIndex:directVideo?allVideoDownloads.indexOf(directVideo):-1};
+    }
+    return {matched:false,replyText:'',imageIndex:-1,videoIndex:-1,directVideoIndex:-1};
+  },prompt);
 }
-async function waitForMuseVideoResult(page, previousCount, previousGeneratedCount, oldText, prompt, timeoutMs) {
+function checkScopedMuseError(response){
+  const reason=quotaMessage(response.replyText);
+  if(reason){const error=new Error('Muse báo hết token hoặc hạn mức.');error.code='MUSE_QUOTA';error.reason=reason;throw error}
+  const match=response.replyText.match(/(?:something went wrong|generation failed|failed to generate|please try again later|temporarily unavailable|không thể tạo|không tạo được|gặp trục trặc khi tạo|thử lại sau một chút|tạo nội dung thất bại|đã xảy ra lỗi)/i);
+  if(match){const error=new Error(`Muse báo lỗi tạo nội dung: ${response.replyText.slice(match.index,match.index+300).trim()}`);error.code='MUSE_GENERATION_FAILED';throw error}
+}
+async function waitForMuseResult(page,prompt,type,timeoutMs){
   const started=Date.now();
   while(Date.now()-started<timeoutMs){
-    const videoCount=await page.locator('video').count().catch(()=>0);
-    // Muse labels generated clips as "Open animated video" in the chat UI.
-    // Accept both labels because the accessible name differs across layouts.
-    const generatedCount=await page.getByRole('button',{name:/Open (?:generated|animated) video/i}).count().catch(()=>0);
-    if(videoCount>previousCount||generatedCount>previousGeneratedCount)return;
-    checkQuotaReply(await page.locator('body').innerText().catch(()=>''),oldText,prompt);
+    const response=await museResponseForPrompt(page,prompt);
+    if(response.matched){checkScopedMuseError(response);if(type==='Ảnh'?response.imageIndex>=0:(response.videoIndex>=0||response.directVideoIndex>=0))return response}
     await page.waitForTimeout(1200);
   }
-  throw new Error('Muse đã trả lời nhưng video chưa hiện để tải trong thời gian chờ tối đa.');
+  throw new Error(`Muse chưa hiện ${type.toLowerCase()} gắn với prompt này trong thời gian chờ tối đa.`);
 }
-async function downloadLatestImage(page, previousCount, previousDownloadCount, prompt) {
-  const images = page.getByRole('button', { name: /Open generated image/i });
-  const count = await images.count();
-  const directDownloads = page.getByRole('button', { name: 'Download', exact: true });
-  if (count > previousCount) await images.last().click();
-  else if (await directDownloads.count() <= previousDownloadCount) return null;
+async function downloadLatestImage(page, prompt) {
+  const response=await museResponseForPrompt(page,prompt);
+  if(!response.matched||response.imageIndex<0)throw new Error('Không tìm thấy ảnh nằm trong phản hồi của prompt này.');
+  await page.getByRole('button', { name: /Open generated image/i }).nth(response.imageIndex).click();
   const downloadButton = page.getByRole('button', { name: 'Download', exact: true });
   await downloadButton.waitFor({ state: 'visible', timeout: 10000 });
   const downloadPromise = page.waitForEvent('download', { timeout: 30000 });
@@ -308,14 +398,17 @@ async function downloadLatestImage(page, previousCount, previousDownloadCount, p
   if (await close.count()) await close.last().click().catch(() => {});
   return target;
 }
-async function downloadLatestVideo(page, previousCount, previousGeneratedCount, prompt, timeoutMs = 15000) {
-  const videos = page.locator('video');
-  const count = await videos.count();
-  const generated = page.getByRole('button', { name: /Open (?:generated|animated) video/i });
-  const generatedCount = await generated.count();
-  if (count <= previousCount && generatedCount <= previousGeneratedCount) return null;
-  if (generatedCount > 0) await generated.last().click();
-  const downloadButton = page.getByRole('button', { name: /Download/i }).last();
+async function downloadLatestVideo(page, prompt, timeoutMs = 15000) {
+  const response=await museResponseForPrompt(page,prompt);
+  if(!response.matched||(response.videoIndex<0&&response.directVideoIndex<0))throw new Error('Không tìm thấy video nằm trong phản hồi của prompt này.');
+  let downloadButton;
+  const openedDialog=response.directVideoIndex<0;
+  if(response.directVideoIndex>=0)downloadButton=page.locator('button[aria-label="Download video"]').nth(response.directVideoIndex);
+  else{
+    const generated = page.getByRole('button', { name: /Open (?:generated|animated) video/i });
+    await generated.nth(response.videoIndex).click();
+    downloadButton=page.getByRole('button', { name: /Download/i }).last();
+  }
   await downloadButton.waitFor({ state: 'visible', timeout: Math.max(1000,timeoutMs) });
   const downloadPromise = page.waitForEvent('download', { timeout: 60000 });
   await downloadButton.click();
@@ -323,97 +416,103 @@ async function downloadLatestVideo(page, previousCount, previousGeneratedCount, 
   const ext = path.extname(download.suggestedFilename()) || '.mp4';
   const target=reserveOutputPath(prompt,ext,'Video');
   try{await download.saveAs(target)}finally{outputReservations.delete(target)}
-  const close = page.getByRole('button', { name: 'Close' });
-  if (await close.count()) await close.last().click().catch(() => {});
+  if(openedDialog){const close = page.getByRole('button', { name: 'Close' });if (await close.count()) await close.last().click().catch(() => {});}
   return target;
 }
-async function runMuseBatch(batch) {
-  batch.status = 'Đang chạy trên Muse';
-  try {
-    const start=Math.max(0,accounts.findIndex(a=>a.id===batch.accountId));
-    const ordered=[...accounts.slice(start),...accounts.slice(0,start)].filter(a=>a.enabled);
-    let quotaAccounts=0;
-    for(const account of ordered){
-    if(!batch.jobs.some(j=>j.status==='Trong hàng đợi'))break;
-    if(!accountAvailable(account)){quotaAccounts++;continue}
-    let status;
-    try{status=museContextIsAlive()&&musePage&&!musePage.isClosed()&&museState==='ready'&&museAccountId===account.id?museStatus():await connectMuse(account.id,true)}
-    catch(e){continue}
-    if(status.state!=='ready')continue;
-    batch.activeAccountId=account.id;
-    await setMuseWindowState('minimized');
-    for (const job of batch.jobs) if(job.type==='Cần xem lại'){job.status='Cần xem lại';job.error='Thêm tiền tố Ảnh: hoặc Video: để xác định loại tác vụ.'}
-    const queues={ 'Ảnh':batch.jobs.filter(j=>j.type==='Ảnh'&&j.status==='Trong hàng đợi'), 'Video':batch.jobs.filter(j=>j.type==='Video'&&j.status==='Trong hàng đợi') };
-    const cursors={ 'Ảnh':0, 'Video':0 };
-    let quotaHit=false;
-    async function worker(type,index){
-      const queue=queues[type];
-      while(!quotaHit&&cursors[type]<queue.length){const job=queue[cursors[type]++];if(!batch.jobs.includes(job))continue;let page=null;
-        try{
-          if(!museContextIsAlive()){
-            await discardStaleMuseContext();
-            const recovered=await connectMuse(account.id,true);
-            if(recovered.state!=='ready')throw new Error('Phiên Muse đã đóng; cần đăng nhập lại trong cửa sổ Muse rồi chạy lại tác vụ.');
-          }
-          try { page=await museContext.newPage(); }
-          catch (e) {
-            if(!/Target page, context or browser has been closed/i.test(e.message))throw e;
-            await discardStaleMuseContext();
-            const recovered=await connectMuse(account.id,true);
-            if(recovered.state!=='ready')throw new Error('Phiên Muse đã đóng; cần đăng nhập lại trong cửa sổ Muse rồi chạy lại tác vụ.');
-            page=await museContext.newPage();
-          }
-          await page.goto('https://muse.ai/',{waitUntil:'domcontentloaded'});await page.waitForTimeout(1200);
-          if(!await isMuseReady(page))throw new Error('Phiên Muse cần đăng nhập lại.');
-          await startNewMuseConversation(page);
-          if(job.referenceImagePath){
-            const attach=page.locator('button[aria-label="Attach file"]').first();
-            if(!await attach.count())throw new Error('Không tìm thấy nút đính kèm ảnh trên Muse.');
-            const chooserPromise=page.waitForEvent('filechooser',{timeout:10000});
-            await attach.click();
-            const chooser=await chooserPromise;
-            await chooser.setFiles(job.referenceImagePath);
-            await page.getByRole('button',{name:'Remove attachment',exact:true}).first().waitFor({state:'visible',timeout:15000});
-            await page.waitForTimeout(700);
-          }
-          const textbox=page.getByRole('textbox',{name:/Message/i}).first(),oldText=await page.locator('body').innerText(),oldImages=await page.getByRole('button',{name:/Open generated image/i}).count(),oldImageDownloads=await page.getByRole('button',{name:'Download',exact:true}).count(),oldVideos=await page.locator('video').count(),oldGeneratedVideos=await page.getByRole('button',{name:/Open generated video/i}).count();
-          checkQuotaReply(oldText,'',job.prompt);
-          const timeoutMs=(type==='Ảnh'?settings.imageTimeout:settings.videoTimeout)*60_000,deadline=Date.now()+timeoutMs;
-          job.status='Đang gửi lên Muse';job.accountId=account.id;job.startedAt=new Date().toISOString();job.worker=index+1;persistHistory();await textbox.fill(job.prompt);
-          try{await page.getByRole('button',{name:'Send',exact:true}).click()}
-          catch(e){checkQuotaReply(await page.locator('body').innerText().catch(()=>''),oldText,job.prompt);throw e}
-          job.status='Đang tạo trên Muse';persistHistory();
-          if(type==='Ảnh'){
-            await waitForMuseReply(page,oldText,job.prompt,Math.max(1000,deadline-Date.now()));
-            job.outputPath=await downloadLatestImage(page,oldImages,oldImageDownloads,job.prompt);
-          }else{
-            // Look for the actual new clip instead of relying on a transient
-            // "Stop" button that may disappear before the first poll.
-            await waitForMuseVideoResult(page,oldVideos,oldGeneratedVideos,oldText,job.prompt,Math.max(1000,deadline-Date.now()));
-            job.outputPath=await downloadLatestVideo(page,oldVideos,oldGeneratedVideos,job.prompt,Math.max(1000,deadline-Date.now()));
-          }
-          if(!job.outputPath)throw new Error('Muse hoàn tất nhưng không tìm thấy file để tải.');job.status='Hoàn tất';job.error=null;job.finishedAt=new Date().toISOString();
-        }catch(e){if(isQuotaError(e)){quotaHit=true;account.quotaBlockedAt=new Date().toISOString();account.quotaReason=e.reason;persistAccounts();job.status='Trong hàng đợi';job.error=null;job.startedAt=null;job.accountId=null;}else{job.status='Lỗi';job.error=e.message;}}
-        finally{if(page&&page!==musePage)await page.close().catch(()=>{});persistHistory()}
-      }
-    }
-    const work=[];for(const type of ['Ảnh','Video']){const count=batch.jobs.filter(j=>j.type===type).length,limit=Math.min(count,Math.max(1,Math.min(4,Number(settings[type==='Ảnh'?'imageWorkers':'videoWorkers'])||1)));for(let i=0;i<limit;i++)work.push(worker(type,i))}batch.workers=work.length;await Promise.all(work);
-    if(quotaHit)quotaAccounts++;
-    }
-    if(batch.jobs.some(j=>j.status==='Trong hàng đợi'))batch.status=quotaAccounts?'Tạm dừng: hết hạn mức':'Tạm dừng: cần đăng nhập';
-    else batch.status=batch.jobs.some(j=>j.status==='Lỗi')?'Hoàn tất, có lỗi':'Hoàn tất';
-    persistHistory();
-  } catch (e) {
-    museState = 'error'; batch.status = 'Tạm dừng: cần đăng nhập';batch.error=e.message;
-    persistHistory();
-  }
+const activeAccountJobs=new Map();
+const activeWorkerChildren=new Set();
+function runMuseTaskProcess(account,job){
+  return new Promise((resolve,reject)=>{
+    const child=fork(path.join(ROOT,'muse-task-worker.js'),[],{silent:true});
+    activeWorkerChildren.add(child);
+    let stderr='';
+    child.stderr?.on('data',chunk=>{stderr=(stderr+chunk.toString()).slice(-4000)});
+    const hardTimeout=((job.type==='Ảnh'?settings.imageTimeout:settings.videoTimeout)+2)*60_000;
+    const timer=setTimeout(()=>{child.kill();reject(Object.assign(new Error('Tiến trình Muse vượt quá thời gian chờ.'),{code:'MUSE_WORKER_TIMEOUT'}))},hardTimeout);
+    let settled=false;
+    const finish=(error,result)=>{if(settled)return;settled=true;clearTimeout(timer);activeWorkerChildren.delete(child);error?reject(error):resolve(result)};
+    child.once('error',finish);
+    child.once('exit',code=>{if(!settled)finish(Object.assign(new Error(stderr||`Tiến trình Muse dừng với mã ${code}.`),{code:'MUSE_WORKER_EXIT'}))});
+    child.once('message',result=>{
+      if(result?.ok)return finish(null,result);
+      finish(Object.assign(new Error(result?.error||'Muse không trả kết quả.'),{code:result?.code||'KSTUDIO_ERROR'}));
+    });
+    child.send({root:ROOT,chromePath:CHROME_PATH,profileDir:account.profileDir,prompt:job.prompt,type:job.type,referenceImagePath:job.referenceImagePath||null,timeoutMs:(job.type==='Ảnh'?settings.imageTimeout:settings.videoTimeout)*60_000,tempDir:path.join(DATA_ROOT,'.downloads'),jobId:job.id});
+  });
 }
+function applyWorkerQuota(account,quota){
+  if(!quota||!Number.isFinite(Number(quota.percent)))return;
+  account.quotaUsedPct=Number(quota.percent);account.quotaObservedAt=new Date().toISOString();account.quotaResetLabel=quota.resetLabel||null;account.additionalTokensLabel=quota.additionalTokensLabel||null;persistAccounts();
+}
+async function storeWorkerResult(job,tempPath){
+  if(!tempPath||!fs.existsSync(tempPath))throw new Error('Muse hoàn tất nhưng không tìm thấy file tải xuống.');
+  const target=reserveOutputPath(job.prompt,path.extname(tempPath)||(job.type==='Ảnh'?'.webp':'.mp4'),job.type);
+  try{fs.copyFileSync(tempPath,target);fs.unlinkSync(tempPath);job.outputPath=target}
+  finally{outputReservations.delete(target)}
+  job.outputPath=await cropToAspect(job.outputPath,job.type,parseAspectRatio(job.aspectRatio));
+  finalizeTeamOutput(job);
+}
+async function runMuseBatch(batch) {
+  batch.status='Đang chạy trên Muse';batch.error=null;
+  try{
+    if(museContext)await discardStaleMuseContext();
+    for(const job of batch.jobs)if(job.type==='Cần xem lại'){job.status='Cần xem lại';job.error='Thêm tiền tố Ảnh: hoặc Video: để xác định loại tác vụ.'}
+    const presentTypes=['Ảnh','Video'].filter(type=>batch.jobs.some(job=>job.type===type&&job.status==='Trong hàng đợi'));
+    for(const type of presentTypes){
+      if(batch.cancelRequested)break;
+      const pending=batch.jobs.filter(job=>job.type===type&&job.status==='Trong hàng đợi');
+      const eligible=accountsForType(type).filter(account=>accountAvailable(account)&&(!batch.strictAccount||account.id===batch.accountId));
+      const start=Math.max(0,eligible.findIndex(account=>account.id===batch.accountId));
+      const ordered=start>0?[...eligible.slice(start),...eligible.slice(0,start)]:eligible;
+      const configured=type==='Ảnh'?settings.imageWorkers:settings.videoWorkers;
+      const requested=presentTypes.length===1?(batch.workers||configured):configured;
+      const maximum=type==='Ảnh'?3:5;
+      const pool=ordered.slice(0,Math.min(maximum,requested,pending.length));
+      if(!pool.length){batch.status='Tạm dừng: thiếu tài khoản phù hợp';batch.error=type==='Ảnh'?'Không có tài khoản Muse đang bật để tạo ảnh.':'Không có tài khoản Muse phù hợp để tạo video.';persistHistory();return}
+      batch.workers=Math.max(batch.workers||0,pool.length);batch.activeAccountId=pool[0].id;
+      let cursor=0;
+      async function accountLoop(account,index){
+        while(!batch.cancelRequested){
+          const job=pending[cursor++];if(!job)break;
+          if(job.status!=='Trong hàng đợi')continue;
+          if(job.outputPath&&fs.existsSync(job.outputPath)&&job.teamOutputBase){job.outputPath=await cropToAspect(job.outputPath,job.type,parseAspectRatio(job.aspectRatio));finalizeTeamOutput(job);job.status='Hoàn tất';job.error=null;job.finishedAt=new Date().toISOString();persistHistory();continue}
+          job.status='Đang tạo trên Muse';job.accountId=account.id;job.startedAt=new Date().toISOString();job.worker=index+1;job.promptSent=true;job.error=null;job.errorCode=null;activeAccountJobs.set(account.id,job.id);persistHistory();
+          try{
+            const result=await runMuseTaskProcess(account,job);
+            await storeWorkerResult(job,result.tempPath);applyWorkerQuota(account,result.quota);
+            job.status='Hoàn tất';job.error=null;job.errorCode=null;job.finishedAt=new Date().toISOString();
+          }catch(error){
+            if(error.code==='MUSE_QUOTA'){account.quotaBlockedAt=new Date().toISOString();account.quotaReason=error.message;persistAccounts()}
+            const retryable=['MUSE_GENERATION_FAILED','MUSE_QUOTA','MUSE_LOGIN_REQUIRED','MUSE_WORKER_TIMEOUT','MUSE_WORKER_EXIT'].includes(error.code);
+            if(retryable&&!batch.cancelRequested&&(job.retryCount||0)<(batch.maxRetries||0)){
+              job.retryCount=(job.retryCount||0)+1;job.status='Trong hàng đợi';job.error=null;job.errorCode=null;job.startedAt=null;job.accountId=null;job.promptSent=false;pending.push(job);
+            }else{job.status='Lỗi';job.error=error.message;job.errorCode=error.code||'KSTUDIO_ERROR'}
+          }finally{activeAccountJobs.delete(account.id);persistHistory()}
+        }
+      }
+      await Promise.all(pool.map(accountLoop));
+    }
+    if(batch.cancelRequested){for(const job of batch.jobs)if(job.status==='Trong hàng đợi')job.status='Đã hủy';batch.status='Đã hủy'}
+    else if(batch.jobs.some(job=>job.status==='Trong hàng đợi')){batch.status='Tạm dừng: cần đăng nhập';batch.error='Một số tài khoản chưa đăng nhập hoặc không còn khả dụng.'}
+    else batch.status=batch.jobs.some(job=>job.status==='Lỗi')?'Hoàn tất, có lỗi':'Hoàn tất';
+    persistHistory();
+  }catch(error){batch.status='Lỗi kết nối Muse';batch.error=error.message;persistHistory()}
+}
+let localApiControl=null;
 const server=http.createServer(async(req,res)=>{
   const url=new URL(req.url,'http://localhost');
   if(req.method==='GET' && url.pathname==='/api/health') return respond(res,200,{ok:true,mode:'local',museConnected:museState==='ready'});
-  if(req.method==='GET' && url.pathname==='/api/version') return respond(res,200,{version:'kstudio-account-rotation-v18',appVersion:require('./package.json').version});
+  if(req.method==='GET' && url.pathname==='/api/version') return respond(res,200,{version:'kstudio-localdata-v51',appVersion:require('./package.json').version,dataRoot:DATA_ROOT});
+  if(req.method==='GET' && url.pathname==='/api/local-api/status') return respond(res,200,localApiControl?.status()||{enabled:false,listening:false,error:'API cục bộ chưa khởi động.'});
+  if(req.method==='POST' && (url.pathname==='/api/local-api/reveal'||url.pathname==='/api/local-api/rotate')) {
+    const origin=req.headers.origin;
+    if(![`http://127.0.0.1:${PORT}`,`http://localhost:${PORT}`].includes(origin))return respond(res,403,{error:'Chỉ thao tác từ giao diện K Studio trên máy này.'});
+    if(!localApiControl)return respond(res,503,{error:'API cục bộ chưa khởi động.'});
+    try{return url.pathname.endsWith('/reveal')?respond(res,200,{apiKey:localApiControl.reveal()}):respond(res,200,localApiControl.rotate())}
+    catch(e){return respond(res,500,{error:e.message})}
+  }
   if(req.method==='GET' && url.pathname==='/api/settings') return respond(res,200,settings);
-  if(req.method==='GET' && url.pathname==='/api/accounts') return respond(res,200,{activeId:museAccountId,state:museState,accounts:accounts.map(a=>({id:a.id,name:a.name,enabled:a.enabled,primary:a.primary,open:!!(museContext&&museAccountId===a.id),session:museAccountId===a.id?museState:'Chưa mở',quotaBlocked:!accountAvailable(a)&&a.enabled,quotaBlockedAt:a.quotaBlockedAt||null,quotaReason:a.quotaReason||null,quotaRetryAt:a.quotaBlockedAt?new Date(Date.parse(a.quotaBlockedAt)+QUOTA_RECHECK_MS).toISOString():null,jobs:Array.from(batches.values()).reduce((n,b)=>n+b.jobs.filter(j=>(j.accountId||b.accountId)===a.id).length,0)}))});
+  if(req.method==='GET' && url.pathname==='/api/accounts') return respond(res,200,{activeId:museAccountId,state:museState,accounts:accounts.map(a=>({id:a.id,name:a.name,enabled:a.enabled,primary:a.primary,open:activeAccountJobs.has(a.id)||!!(museContext&&museAccountId===a.id),session:activeAccountJobs.has(a.id)?'Đang chạy':museAccountId===a.id?museState:'Chưa mở',quotaBlocked:!accountAvailable(a)&&a.enabled,quotaBlockedAt:a.quotaBlockedAt||null,quotaReason:a.quotaReason||null,quotaRetryAt:a.quotaBlockedAt?new Date(Date.parse(a.quotaBlockedAt)+QUOTA_RECHECK_MS).toISOString():null,...quotaSnapshot(a),jobs:Array.from(batches.values()).reduce((n,b)=>n+b.jobs.filter(j=>(j.accountId||b.accountId)===a.id).length,0)}))});
   if(req.method==='POST' && url.pathname==='/api/accounts') {
     try { const data=await bodyJson(req),name=String(data.name||'').trim();if(!name)return respond(res,400,{error:'Nhập tên tài khoản.'});const account={id:crypto.randomUUID().replace(/-/g,''),name,enabled:true,primary:false,profileDir:path.join(ROOT,'.muse-profiles'),createdAt:new Date().toISOString()};accounts.push(account);persistAccounts();return respond(res,201,{id:account.id,name:account.name,enabled:account.enabled,primary:account.primary,open:false,session:'Chưa đăng nhập'}); } catch(e){return respond(res,400,{error:e.message});}
   }
@@ -426,18 +525,21 @@ const server=http.createServer(async(req,res)=>{
   }
   if(req.method==='PUT' && url.pathname.startsWith('/api/accounts/')) {
     const id=url.pathname.split('/')[3],account=accounts.find(a=>a.id===id);if(!account)return respond(res,404,{error:'Không tìm thấy tài khoản.'});
-      try{const data=await bodyJson(req);if(data.name!==undefined){const name=String(data.name).trim();if(!name)return respond(res,400,{error:'Tên tài khoản không được để trống.'});account.name=name}if(data.enabled!==undefined){if(!data.enabled&&runningBatches.size&&museAccountId===id)return respond(res,409,{error:'Tài khoản còn tác vụ đang chạy.'});account.enabled=Boolean(data.enabled);if(!account.enabled&&accounts.filter(a=>a.enabled).length===0)return respond(res,400,{error:'Cần giữ ít nhất một tài khoản đang bật.'});if(!account.enabled&&account.primary){account.primary=false;const next=accounts.find(a=>a.enabled);if(next)next.primary=true}if(!account.enabled&&museAccountId===id&&museContext){await museContext.close().catch(()=>{});museContext=null;musePage=null;museState='disconnected'}}if(data.primary){if(!account.enabled)return respond(res,400,{error:'Hãy bật tài khoản trước.'});for(const a of accounts)a.primary=false;account.primary=true}if(data.move){const from=accounts.indexOf(account),to=Math.max(0,Math.min(accounts.length-1,from+Number(data.move)));accounts.splice(from,1);accounts.splice(to,0,account)}persistAccounts();if(data.enabled)resumePausedBatches();return respond(res,200,{id:account.id,name:account.name,enabled:account.enabled,primary:account.primary,open:museAccountId===id&&!!museContext,session:museAccountId===id?museState:'Chưa mở'});}catch(e){return respond(res,400,{error:e.message});}
+      try{const data=await bodyJson(req);if(data.name!==undefined){const name=String(data.name).trim();if(!name)return respond(res,400,{error:'Tên tài khoản không được để trống.'});account.name=name}if(data.enabled!==undefined){if(!data.enabled&&runningBatches.size&&museAccountId===id)return respond(res,409,{error:'Tài khoản còn tác vụ đang chạy.'});account.enabled=Boolean(data.enabled);if(!account.enabled&&accounts.filter(a=>a.enabled).length===0)return respond(res,400,{error:'Cần giữ ít nhất một tài khoản đang bật.'});if(!account.enabled&&account.primary){account.primary=false;const next=accounts.find(a=>a.enabled);if(next)next.primary=true}if(!account.enabled&&museAccountId===id&&museContext){await museContext.close().catch(()=>{});museContext=null;musePage=null;museState='disconnected'}}if(data.primary){if(!account.enabled)return respond(res,400,{error:'Hãy bật tài khoản trước.'});for(const a of accounts)a.primary=false;account.primary=true;const index=accounts.indexOf(account);if(index>0){accounts.splice(index,1);accounts.unshift(account)}}if(data.move){const from=accounts.indexOf(account),to=Math.max(0,Math.min(accounts.length-1,from+Number(data.move)));accounts.splice(from,1);accounts.splice(to,0,account)}persistAccounts();if(data.enabled)resumePausedBatches();return respond(res,200,{id:account.id,name:account.name,enabled:account.enabled,primary:account.primary,open:museAccountId===id&&!!museContext,session:museAccountId===id?museState:'Chưa mở'});}catch(e){return respond(res,400,{error:e.message});}
   }
   if(req.method==='DELETE' && url.pathname.startsWith('/api/accounts/')) {
-    const id=url.pathname.split('/')[3];if(Array.from(batches.values()).some(b=>b.accountId===id&&!['Hoàn tất','Hoàn tất, có lỗi','Lỗi kết nối Muse','Chờ đăng nhập Muse','Lỗi'].includes(b.status)))return respond(res,409,{error:'Tài khoản còn tác vụ đang chạy.'});if(accounts.length<=1)return respond(res,400,{error:'Phải giữ lại ít nhất một tài khoản.'});const index=accounts.findIndex(a=>a.id===id);if(index<0)return respond(res,404,{error:'Không tìm thấy tài khoản.'});if(museAccountId===id&&museContext){await museContext.close().catch(()=>{});museContext=null;musePage=null;museState='disconnected';}accounts.splice(index,1);if(!accounts.some(a=>a.primary))accounts[0].primary=true;persistAccounts();return respond(res,200,{ok:true});
+    const id=url.pathname.split('/')[3];if(Array.from(batches.values()).some(b=>b.accountId===id&&!['Hoàn tất','Hoàn tất, có lỗi','Lỗi kết nối Muse','Chờ đăng nhập Muse','Lỗi'].includes(b.status)))return respond(res,409,{error:'Tài khoản còn tác vụ đang chạy.'});if(accounts.length<=1)return respond(res,400,{error:'Phải giữ lại ít nhất một tài khoản.'});const index=accounts.findIndex(a=>a.id===id);if(index<0)return respond(res,404,{error:'Không tìm thấy tài khoản.'});if(museAccountId===id&&museContext){await museContext.close().catch(()=>{});museContext=null;musePage=null;museState='disconnected';}accounts.splice(index,1);if(!accounts.some(a=>a.primary))accounts[0].primary=true;if(settings.imageAccountId===id){settings.imageAccountId='';persistSettings()}persistAccounts();return respond(res,200,{ok:true});
   }
   if(req.method==='PUT' && url.pathname==='/api/settings') {
     try {
       const data=await bodyJson(req);
       if(data.outputDir!==undefined) { const p=path.resolve(String(data.outputDir)); if(!path.isAbsolute(p)) return respond(res,400,{error:'Thư mục lưu không hợp lệ.'}); settings.outputDir=p; }
-      for(const key of ['imageWorkers','videoWorkers']) if(data[key]!==undefined) settings[key]=Math.max(1,Math.min(4,Number(data[key])||2));
+      if(data.imageWorkers!==undefined)settings.imageWorkers=Math.max(1,Math.min(3,Number(data.imageWorkers)||DEFAULT_SETTINGS.imageWorkers));
+      if(data.videoWorkers!==undefined)settings.videoWorkers=Math.max(1,Math.min(5,Number(data.videoWorkers)||DEFAULT_SETTINGS.videoWorkers));
       for(const key of ['imageTimeout','videoTimeout']) if(data[key]!==undefined) settings[key]=Math.max(1,Math.min(240,Number(data[key])||DEFAULT_SETTINGS[key]));
       for(const key of ['allowedDomainsEnabled','allowedDomains','promptSeparator','autoReservePercent']) if(data[key]!==undefined) settings[key]=key==='autoReservePercent'?Math.max(0,Math.min(100,Number(data[key])||0)):data[key];
+      if(data.imageAccountId!==undefined){const id=String(data.imageAccountId||'');if(id&&!accounts.some(a=>a.id===id))return respond(res,400,{error:'Không tìm thấy tài khoản dành cho ảnh.'});settings.imageAccountId=id;}
+      if(data.videoAccountMode!==undefined){const mode=String(data.videoAccountMode);if(!['all','exclude-image-account'].includes(mode))return respond(res,400,{error:'Chế độ chọn tài khoản video không hợp lệ.'});settings.videoAccountMode=mode;}
       persistSettings(); return respond(res,200,settings);
     } catch(e) { return respond(res,400,{error:e.message}); }
   }
@@ -481,6 +583,34 @@ const server=http.createServer(async(req,res)=>{
   }
   if(req.method==='DELETE' && url.pathname.startsWith('/api/jobs/')) { try { const id=decodeURIComponent(url.pathname.slice('/api/jobs/'.length));let owner=null,index=-1;for(const batch of batches.values()){index=batch.jobs.findIndex(job=>job.id===id);if(index>=0){owner=batch;break}}if(!owner)return respond(res,404,{error:'Không tìm thấy tác vụ.'});const job=owner.jobs[index];if(job.outputPath){const outputRoot=outputRootDir(),target=path.resolve(job.outputPath),relative=path.relative(outputRoot,target);if(relative.startsWith('..')||path.isAbsolute(relative))return respond(res,400,{error:'File kết quả nằm ngoài thư mục lưu.'});if(fs.existsSync(target))fs.unlinkSync(target)}owner.jobs.splice(index,1);if(!owner.jobs.length)batches.delete(owner.id);persistHistory();return respond(res,200,{ok:true}); } catch(e) { return respond(res,500,{error:e.message}); } }
   if(req.method==='GET' && url.pathname==='/api/muse/status') return respond(res,200,museStatus());
+  if(req.method==='POST' && url.pathname==='/api/muse/stop-active') {
+    try {
+      const data=await bodyJson(req),id=data.accountId||museAccountId||'default';
+      if(runningBatches.size&&id!==museAccountId)return respond(res,409,{error:'Tài khoản hiện tại còn tác vụ K Studio đang chạy. Đợi xong rồi chuyển phiên.'});
+      let status=museStatus();
+      if(status.state!=='ready'||status.accountId!==id)status=await connectMuse(id,true);
+      if(status.state!=='ready')return respond(res,409,{error:'Tài khoản Muse chưa sẵn sàng.'});
+      if(!/^https?:\/\/(www\.)?muse\.ai\/?(?:[?#].*)?$/i.test(musePage.url()))await musePage.goto('https://muse.ai/',{waitUntil:'domcontentloaded'});
+      await musePage.waitForTimeout(1200);
+      let stopped=0;
+      for(let pass=0;pass<5;pass++){
+        const clicked=await musePage.evaluate(()=>{
+          const visible=element=>{const style=getComputedStyle(element),box=element.getBoundingClientRect();return style.visibility!=='hidden'&&style.display!=='none'&&box.width>0&&box.height>0};
+          const buttons=Array.from(document.querySelectorAll('button,[role="button"]')).filter(element=>{
+            if(!visible(element))return false;
+            const label=[element.getAttribute('aria-label'),element.getAttribute('title'),element.textContent].filter(Boolean).join(' ').replace(/\s+/g,' ').trim();
+            return /^(stop|stop generating|dừng|dừng tạo)$/i.test(label);
+          });
+          for(const button of buttons)button.click();
+          return buttons.length;
+        });
+        stopped+=clicked;
+        if(!clicked)break;
+        await musePage.waitForTimeout(800);
+      }
+      return respond(res,200,{ok:true,stopped,accountId:id});
+    } catch(e) { return respond(res,500,{error:e.message}); }
+  }
   if(req.method==='POST' && url.pathname==='/api/muse/connect') {
     try { const data=await bodyJson(req),id=data.accountId||'default';if(runningBatches.size&&id!==museAccountId)return respond(res,409,{error:'Tài khoản hiện tại còn tác vụ đang chạy. Đợi xong rồi chuyển phiên.'});const result=await connectMuse(id,Boolean(data.hidden));if(result.state==='ready')resumePausedBatches();return respond(res,200,result); }
     catch(e) { museState='error'; return respond(res,500,{state:museState,error:e.message}); }
@@ -500,10 +630,11 @@ const server=http.createServer(async(req,res)=>{
         if(!match||match[1]!==ref.mimeType)return respond(res,400,{error:'Ảnh tham chiếu phải là PNG, JPG hoặc WebP hợp lệ.'});
         const decoded=Buffer.from(match[2],'base64');if(decoded.length>6*1024*1024)return respond(res,400,{error:'Mỗi ảnh tham chiếu tối đa 6 MB.'});if(decoded.toString('base64')!==match[2])return respond(res,400,{error:'Dữ liệu ảnh tham chiếu không hợp lệ.'});
       }
-      const workers=1;
+      const inferredType=types.find(type=>type==='Ảnh'||type==='Video')||'Ảnh';
+      const workers=Math.max(1,Math.min(inferredType==='Video'?5:3,Number(data.workers)|| (inferredType==='Video'?settings.videoWorkers:settings.imageWorkers)));
       const accountId=accounts.some(a=>a.id===data.accountId&&a.enabled)?data.accountId:(accounts.find(a=>a.primary&&a.enabled)||accounts.find(a=>a.enabled))?.id;
       if(!accountId)return respond(res,400,{error:'Không có tài khoản Muse đang bật.'});
-      const batch={id:crypto.randomUUID(),status:'Đang chờ',workers,accountId,createdAt:new Date().toISOString(),jobs:valid.map(item=>{const id=crypto.randomUUID(),type=detect(item.prompt),job={id,prompt:item.prompt,type,status:'Trong hàng đợi'};if(item.referenceImage){const ext={'image/png':'.png','image/jpeg':'.jpg','image/webp':'.webp'}[item.referenceImage.mimeType];fs.mkdirSync(REFERENCE_DIR,{recursive:true});job.referenceImagePath=path.join(REFERENCE_DIR,id+ext);job.referenceName=path.basename(String(item.referenceImage.name||'anh-tham-chieu'+ext)).slice(0,180);fs.writeFileSync(job.referenceImagePath,Buffer.from(String(item.referenceImage.data).split(',')[1],'base64'))}return job})};
+      const batch={id:crypto.randomUUID(),status:'Đang chờ',workers,accountId,strictAccount:Boolean(data.strictAccount),createdAt:new Date().toISOString(),jobs:valid.map(item=>{const id=crypto.randomUUID(),type=detect(item.prompt),job={id,prompt:item.prompt,type,status:'Trong hàng đợi'};if(item.referenceImage){const ext={'image/png':'.png','image/jpeg':'.jpg','image/webp':'.webp'}[item.referenceImage.mimeType];fs.mkdirSync(REFERENCE_DIR,{recursive:true});job.referenceImagePath=path.join(REFERENCE_DIR,id+ext);job.referenceName=path.basename(String(item.referenceImage.name||'anh-tham-chieu'+ext)).slice(0,180);fs.writeFileSync(job.referenceImagePath,Buffer.from(String(item.referenceImage.data).split(',')[1],'base64'))}return job})};
       batches.set(batch.id,batch); persistHistory();
       queueBatch(batch);
       return respond(res,201,publicBatch(batch));
@@ -536,8 +667,9 @@ const server=http.createServer(async(req,res)=>{
 });
 server.listen(PORT,'127.0.0.1',()=>{
   console.log(`Muse Batch: http://127.0.0.1:${PORT}`);
+  console.log(`Tài khoản: ${accounts.length} từ ${ACCOUNTS_FILE}`);
   for(const batch of batches.values()){
-    if(!['Đang chạy trên Muse','Đang chờ','Tạm dừng: hết hạn mức','Tạm dừng: cần đăng nhập'].includes(batch.status))continue;
+    if(!['Đang chạy trên Muse','Đang chờ','Tạm dừng: ngưỡng hạn mức','Tạm dừng: hết hạn mức','Tạm dừng: cần đăng nhập'].includes(batch.status))continue;
     for(const job of batch.jobs)if(['Đang gửi lên Muse','Đang tạo trên Muse'].includes(job.status)){
       job.status='Lỗi';job.error='Máy chủ đã khởi động lại khi tác vụ có thể đã được gửi. Kiểm tra Muse trước khi tạo lại để tránh video trùng.';
     }
@@ -546,7 +678,15 @@ server.listen(PORT,'127.0.0.1',()=>{
   }
   persistHistory();
 });
+localApiControl=startLocalApi({dataRoot:DATA_ROOT,outputRootDir,referenceDir:REFERENCE_DIR,batches,accounts,queueBatch,persistHistory,runningBatches,accountReady:account=>activeAccountJobs.has(account.id)||(museState==='ready'&&museAccountId===account.id&&museContextIsAlive())||fs.existsSync(path.join(account.profileDir,'Default','Network','Cookies'))||fs.existsSync(path.join(account.profileDir,'Default','Cookies')),defaultQuotaThreshold:()=>null,defaultWorkerCount:type=>type==='Video'?settings.videoWorkers:settings.imageWorkers});
+setTimeout(()=>{
+  if(scheduledBatches.size||runningBatches.size)return;
+  const account=accounts.find(a=>a.primary&&a.enabled)||accounts.find(a=>a.enabled);
+  if(account)connectMuse(account.id,true).catch(error=>{museState='error';console.error('Muse startup:',error.message)});
+},1500).unref();
+setInterval(()=>watchMuseLogin().catch(error=>console.error('Muse login watch:',error.message)),5000).unref();
 process.on('SIGINT', async () => {
+  await stopMuseWindowWatcher();
   if (museContext) await museContext.close().catch(() => {});
   server.close(() => process.exit(0));
   setTimeout(() => process.exit(0), 2000).unref();

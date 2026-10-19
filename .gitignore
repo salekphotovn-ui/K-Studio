@@ -5,7 +5,9 @@ node_modules/
 output/
 history.json
 accounts.json
+accounts*.backup*.json
 settings.json
+local-api.json
 .uploads/
 logs/
 *.mp4
@@ -15,3 +17,5 @@ logs/
 dist/
 build/
 release/
+test/
+scripts/test-*.js

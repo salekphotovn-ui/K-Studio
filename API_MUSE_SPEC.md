@@ -11,7 +11,7 @@ Mục tiêu: một chương trình bên ngoài (script của Claude) gửi **c�
 6. **Chạy lại an toàn.** Cùng `job_id` gửi lại thì không tạo trùng; cảnh đã có file ở đích thì bỏ qua.
 
 ## Kết nối
-- Địa chỉ: `http://127.0.0.1:<port>` (ví dụ 8765), chỉ lắng nghe trên máy.
+- Địa chỉ mặc định: `http://127.0.0.1:4174`, chỉ lắng nghe trên máy.
 - Header bắt buộc: `X-Api-Key: <key>`, key hiển thị trong phần Cài đặt của app.
 - JSON UTF-8. Đường dẫn Windows có dấu tiếng Việt phải dùng được (ví dụ `D:/KHOA HỌC CÔNG TRÌNH/...`).
 
@@ -22,7 +22,7 @@ Kiểm tra app và tài khoản.
 ```json
 {
   "ok": true,
-  "version": "0.3.20",
+  "version": "0.3.34",
   "accounts": [
     {"name": "Tài khoản tạo video", "ready": true, "quota_used_pct": 8.3, "resets": "2026-10-22"},
     {"name": "Tài khoản 2", "ready": true, "quota_used_pct": 5.0, "resets": "2026-10-18"}
@@ -36,12 +36,12 @@ Kiểm tra app và tài khoản.
 {
   "job_id": "tokyo-video-01",
   "type": "video",
-  "account": "Tài khoản tạo video",
+  "account": "auto",
+  "workers": 5,
   "aspect_ratio": "16:9",
   "output_dir": "D:/KHOA HỌC CÔNG TRÌNH/visuals/tokyo/videos",
   "skip_existing": true,
   "max_retries": 1,
-  "stop_if_quota_used_over_pct": 90,
   "items": [
     {"id": "s01", "prompt": "Animate this image: slow drone push-in ...", "image": "D:/KHOA HỌC CÔNG TRÌNH/visuals/tokyo/images/s01.jpg"},
     {"id": "s02", "prompt": "Animate this image: camera tilts down ...", "image": "D:/KHOA HỌC CÔNG TRÌNH/visuals/tokyo/images/s02.jpg"}
@@ -53,6 +53,7 @@ Kiểm tra app và tài khoản.
 | `job_id` | có | Do client đặt. Gửi lại cùng `job_id` thì trả về lô cũ, không tạo trùng |
 | `type` | có | `video` hoặc `image` |
 | `account` | không | Tên tài khoản, hoặc `"auto"` để app tự luân phiên khi hết hạn mức hoặc bị Meta ngắt |
+| `workers` | không | Ảnh tối đa 3, video tối đa 5. Mỗi luồng dùng một tài khoản riêng |
 | `aspect_ratio` | không | Mặc định `16:9`. **Phải áp dụng đúng cho mọi item** (hiện giao diện tự quay về 9:16 sau mỗi lần chạy) |
 | `output_dir` | có | App tự tạo thư mục nếu chưa có |
 | `skip_existing` | không | Mặc định `true`: bỏ qua item đã có `<id>.mp4` |
@@ -60,7 +61,7 @@ Kiểm tra app và tài khoản.
 | `stop_if_quota_used_over_pct` | không | Dừng lô khi tài khoản đã dùng quá ngưỡng này |
 | `items[].id` | có | Dùng làm tên file đầu ra. Chỉ gồm chữ, số, `-`, `_` |
 | `items[].prompt` | có | Một prompt, có thể nhiều dòng |
-| `items[].image` | không | Ảnh bắt đầu (ảnh sang video) |
+| `items[].image` | không | Ảnh bắt đầu (ảnh sang video). Có thể dùng tối đa 300 đường dẫn ảnh trong một lô |
 | `items[].images` | không | Danh sách ảnh tham chiếu nhân vật hoặc sản phẩm (tương đương chế độ "Dùng chung" / "Giữ nguyên nhân vật") |
 
 Phản hồi trả về ngay, không chờ tạo xong:

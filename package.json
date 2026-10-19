@@ -1,6 +1,6 @@
 {
   "name": "muse-batch-local",
-  "version": "0.3.20",
+  "version": "0.3.40",
   "private": true,
   "scripts": {
     "start": "node server.js"

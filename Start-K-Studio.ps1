@@ -1,5 +1,7 @@
 $ErrorActionPreference = 'Stop'
 $project = Split-Path -Parent $MyInvocation.MyCommand.Path
+$appVersion = (Get-Content -LiteralPath (Join-Path $project 'package.json') -Raw | ConvertFrom-Json).version
+$buildVersion = 'kstudio-localdata-v51'
 $url = "http://127.0.0.1:4173/?launch=$([DateTimeOffset]::Now.ToUnixTimeSeconds())"
 
 function Get-ChromeAppPath($registryPath) {
@@ -31,13 +33,16 @@ if ($listener) {
   try {
     $oldHistory = @(Invoke-RestMethod -Uri 'http://127.0.0.1:4173/api/history' -TimeoutSec 3)
     $oldAccounts = Invoke-RestMethod -Uri 'http://127.0.0.1:4173/api/accounts' -TimeoutSec 3
+    $oldVersion = Invoke-RestMethod -Uri 'http://127.0.0.1:4173/api/version' -TimeoutSec 3
+    Write-Host "May chu dang chay: K Studio v$($oldVersion.appVersion) ($($oldVersion.version))" -ForegroundColor Cyan
     if (-not $oldAccounts.PSObject.Properties['accounts']) { throw 'K Studio API was not detected.' }
-    $runningStatuses = @('["\u0110ang ch\u1ea1y tr\u00ean Muse","\u0110ang g\u1eedi l\u00ean Muse","\u0110ang t\u1ea1o tr\u00ean Muse"]' | ConvertFrom-Json)
+    $inFlightStatuses = @('["\u0110ang g\u1eedi l\u00ean Muse","\u0110ang t\u1ea1o tr\u00ean Muse"]' | ConvertFrom-Json)
     $active = @($oldHistory | Where-Object {
-      $_.status -in $runningStatuses -or @($_.jobs | Where-Object { $_.status -in $runningStatuses }).Count -gt 0
+      @($_.jobs | Where-Object { $_.status -in $inFlightStatuses }).Count -gt 0
     })
     if ($active.Count -gt 0) {
-      Write-Host 'K Studio dang co tac vu; khong khoi dong lai de tranh gian doan.' -ForegroundColor Yellow
+      Write-Host "Ma nguon hien tai: K Studio v$appVersion ($buildVersion)" -ForegroundColor Cyan
+      Write-Host 'K Studio dang co tac vu; chua the nap phien ban moi de tranh gian doan. Mo giao dien dang chay.' -ForegroundColor Yellow
       Open-KStudio
       exit 0
     }
@@ -64,13 +69,20 @@ if ($listener) {
   }
 }
 
-$node = (Get-Command node.exe -ErrorAction SilentlyContinue).Source
+$bundledNode = Join-Path $project 'runtime\node.exe'
+$node = if (Test-Path -LiteralPath $bundledNode) { $bundledNode } else { (Get-Command node.exe -ErrorAction SilentlyContinue).Source }
 if (-not $node) {
   Write-Host 'Khong tim thay Node.js. Hay cai Node.js roi bam file BAT lai.' -ForegroundColor Red
   exit 1
 }
 
-$dataDirectory = if ($env:KSTUDIO_DATA_DIR) { $env:KSTUDIO_DATA_DIR } else { Join-Path $env:LOCALAPPDATA 'K Studio' }
+$userShellFolders = Get-ItemProperty 'HKCU:\Software\Microsoft\Windows\CurrentVersion\Explorer\User Shell Folders' -ErrorAction SilentlyContinue
+$localAppData = $userShellFolders.'Local AppData'
+if ($localAppData) { $localAppData = [Environment]::ExpandEnvironmentVariables($localAppData) }
+if (-not $localAppData) { $localAppData = Join-Path $env:USERPROFILE 'AppData\Local' }
+$dataDirectory = [IO.Path]::GetFullPath((Join-Path $localAppData 'K Studio'))
+$env:KSTUDIO_DATA_DIR = $dataDirectory
+Write-Host "Du lieu K Studio: $dataDirectory" -ForegroundColor Cyan
 $logDirectory = Join-Path $dataDirectory 'logs'
 New-Item -ItemType Directory -Path $logDirectory -Force | Out-Null
 $serverOutputLog = Join-Path $logDirectory 'server.log'
@@ -82,9 +94,11 @@ for ($i = 0; $i -lt 30; $i++) {
   Start-Sleep -Seconds 1
   try {
     $version = Invoke-RestMethod -Uri 'http://127.0.0.1:4173/api/version' -TimeoutSec 2
-    if ($version.version -eq 'kstudio-account-rotation-v18') {
+    if ($version.version -eq $buildVersion -and $version.dataRoot -ieq $dataDirectory) {
       $page = Invoke-WebRequest -Uri $url -TimeoutSec 3 -UseBasicParsing
-      if ($page.Content.Contains('video-reference-add') -and $page.Content.Contains('video-reference-folder')) { $ready = $true; break }
+      $diskAccountCount = @((Get-Content -LiteralPath (Join-Path $dataDirectory 'accounts.json') -Raw | ConvertFrom-Json)).Count
+      $apiAccountCount = @((Invoke-RestMethod -Uri 'http://127.0.0.1:4173/api/accounts' -TimeoutSec 3).accounts).Count
+      if ($page.Content.Contains('video-reference-add') -and $page.Content.Contains('video-reference-folder') -and $apiAccountCount -eq $diskAccountCount) { $ready = $true; break }
     }
   } catch {}
 }
@@ -94,7 +108,9 @@ if (-not $ready) {
   exit 1
 }
 
+Write-Host "Da nap K Studio v$appVersion ($buildVersion), tai khoan: $apiAccountCount/$diskAccountCount." -ForegroundColor Green
 Open-KStudio
+Start-Sleep -Seconds 3
 
 
 
