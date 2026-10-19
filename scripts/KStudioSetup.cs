@@ -6,6 +6,7 @@ using System.Net;
 using System.Net.Sockets;
 using System.Reflection;
 using System.Runtime.InteropServices;
+using System.Runtime.InteropServices.ComTypes;
 using Microsoft.Win32;
 using System.Windows.Forms;
 
@@ -40,6 +41,7 @@ internal static class KStudioSetup
             var tempRoot = Path.Combine(Path.GetTempPath(), "KStudioSetup-" + Guid.NewGuid().ToString("N"));
             Directory.CreateDirectory(tempRoot);
             Directory.CreateDirectory(InstallRoot);
+            string shortcutWarning = null;
             try
             {
                 using (var payload = Assembly.GetExecutingAssembly().GetManifestResourceStream("KStudioPayload.zip"))
@@ -57,17 +59,27 @@ internal static class KStudioSetup
                     }
                 }
                 CopyDirectory(tempRoot, InstallRoot);
-                CreateShortcuts();
+                try { CreateShortcuts(); }
+                catch (Exception shortcutError)
+                {
+                    shortcutWarning = GetRootException(shortcutError).Message;
+                    WriteSetupLog("Shortcut creation failed", shortcutError);
+                }
             }
             finally { try { Directory.Delete(tempRoot, true); } catch { } }
 
-            var launch = MessageBox.Show("Đã cài K Studio. Máy này cần Google Chrome để đăng nhập Muse. Mở K Studio ngay?", "K Studio Setup", MessageBoxButtons.YesNo, MessageBoxIcon.Information);
+            var installedMessage = "Đã cài K Studio. Máy này cần Google Chrome để đăng nhập Muse.";
+            if (!String.IsNullOrEmpty(shortcutWarning)) installedMessage += "\r\n\r\nKhông tạo được lối tắt tự động: " + shortcutWarning + "\r\nAnh vẫn có thể mở K Studio tại:\r\n" + Path.Combine(InstallRoot, "Mở K Studio.bat");
+            installedMessage += "\r\n\r\nMở K Studio ngay?";
+            var launch = MessageBox.Show(installedMessage, "K Studio Setup", MessageBoxButtons.YesNo, shortcutWarning == null ? MessageBoxIcon.Information : MessageBoxIcon.Warning);
             if (launch == DialogResult.Yes)
                 Process.Start(new ProcessStartInfo { FileName = Path.Combine(InstallRoot, "Mở K Studio.bat"), WorkingDirectory = InstallRoot, UseShellExecute = true });
         }
         catch (Exception error)
         {
-            MessageBox.Show("Không cài được K Studio.\r\n\r\n" + error.Message, "K Studio Setup", MessageBoxButtons.OK, MessageBoxIcon.Error);
+            var rootError = GetRootException(error);
+            var logPath = WriteSetupLog("Installation failed", error);
+            MessageBox.Show("Không cài được K Studio.\r\n\r\n" + rootError.Message + "\r\n\r\nChi tiết: " + error.GetType().FullName + "\r\nNhật ký: " + logPath, "K Studio Setup", MessageBoxButtons.OK, MessageBoxIcon.Error);
         }
     }
 
@@ -154,17 +166,65 @@ if ($signature.Status -ne 'Valid' -or $signer -ne 'Google LLC') { exit 1 }
 
     private static void CreateShortcut(string shortcutPath, string targetPath, string workingDirectory, string description, string arguments = "")
     {
-        var shellType = Type.GetTypeFromProgID("WScript.Shell");
-        object shell = Activator.CreateInstance(shellType);
-        object shortcut = shellType.InvokeMember("CreateShortcut", BindingFlags.InvokeMethod, null, shell, new object[] { shortcutPath });
-        var type = shortcut.GetType();
-        type.InvokeMember("TargetPath", BindingFlags.SetProperty, null, shortcut, new object[] { targetPath });
-        type.InvokeMember("WorkingDirectory", BindingFlags.SetProperty, null, shortcut, new object[] { workingDirectory });
-        type.InvokeMember("Description", BindingFlags.SetProperty, null, shortcut, new object[] { description });
-        if (!String.IsNullOrEmpty(arguments)) type.InvokeMember("Arguments", BindingFlags.SetProperty, null, shortcut, new object[] { arguments });
-        type.InvokeMember("Save", BindingFlags.InvokeMethod, null, shortcut, null);
-        Marshal.FinalReleaseComObject(shortcut);
-        Marshal.FinalReleaseComObject(shell);
+        IShellLinkW link = null;
+        try
+        {
+            link = (IShellLinkW)new ShellLink();
+            link.SetPath(targetPath);
+            link.SetWorkingDirectory(workingDirectory);
+            link.SetDescription(description);
+            if (!String.IsNullOrEmpty(arguments)) link.SetArguments(arguments);
+            link.SetShowCmd(1);
+            ((IPersistFile)link).Save(shortcutPath, true);
+        }
+        finally
+        {
+            if (link != null && Marshal.IsComObject(link)) Marshal.FinalReleaseComObject(link);
+        }
+    }
+
+    private static Exception GetRootException(Exception error)
+    {
+        while (error is TargetInvocationException && error.InnerException != null) error = error.InnerException;
+        return error;
+    }
+
+    private static string WriteSetupLog(string heading, Exception error)
+    {
+        var logPath = Path.Combine(LocalDataRoot, "setup-error.log");
+        try
+        {
+            Directory.CreateDirectory(LocalDataRoot);
+            File.AppendAllText(logPath, "[" + DateTime.Now.ToString("yyyy-MM-dd HH:mm:ss") + "] " + heading + Environment.NewLine + error.ToString() + Environment.NewLine + Environment.NewLine);
+            return logPath;
+        }
+        catch { return "Không ghi được log; lỗi gốc: " + GetRootException(error).Message; }
+    }
+
+    [ComImport, Guid("00021401-0000-0000-C000-000000000046"), ClassInterface(ClassInterfaceType.None)]
+    private class ShellLink { }
+
+    [ComImport, Guid("000214F9-0000-0000-C000-000000000046"), InterfaceType(ComInterfaceType.InterfaceIsIUnknown)]
+    private interface IShellLinkW
+    {
+        void GetPath(IntPtr file, int maxPath, IntPtr findData, uint flags);
+        void GetIDList(out IntPtr itemIdList);
+        void SetIDList(IntPtr itemIdList);
+        void GetDescription(IntPtr name, int maxName);
+        void SetDescription([MarshalAs(UnmanagedType.LPWStr)] string name);
+        void GetWorkingDirectory(IntPtr directory, int maxPath);
+        void SetWorkingDirectory([MarshalAs(UnmanagedType.LPWStr)] string directory);
+        void GetArguments(IntPtr arguments, int maxPath);
+        void SetArguments([MarshalAs(UnmanagedType.LPWStr)] string arguments);
+        void GetHotkey(out short hotkey);
+        void SetHotkey(short hotkey);
+        void GetShowCmd(out int showCommand);
+        void SetShowCmd(int showCommand);
+        void GetIconLocation(IntPtr iconPath, int maxPath, out int iconIndex);
+        void SetIconLocation([MarshalAs(UnmanagedType.LPWStr)] string iconPath, int iconIndex);
+        void SetRelativePath([MarshalAs(UnmanagedType.LPWStr)] string path, uint reserved);
+        void Resolve(IntPtr window, uint flags);
+        void SetPath([MarshalAs(UnmanagedType.LPWStr)] string path);
     }
 
     private const string UninstallerScript = @"

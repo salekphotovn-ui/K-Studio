@@ -6,6 +6,7 @@ $stage = Join-Path $release 'installer-stage'
 $appStage = Join-Path $stage 'app'
 $node = (Get-Command node.exe -ErrorAction Stop).Source
 $compiler = Join-Path $env:WINDIR 'Microsoft.NET\Framework64\v4.0.30319\csc.exe'
+$launcherBat = 'M' + [char]0x1EDF + ' K Studio.bat'
 if (-not (Test-Path -LiteralPath $compiler)) { throw 'Khong tim thay bo bien dich C# co san cua Windows.' }
 
 $releaseFull = [IO.Path]::GetFullPath($release)
@@ -17,7 +18,7 @@ New-Item -ItemType Directory -Path $appStage -Force | Out-Null
 $files = @(
   'server.js', 'local-api.js', 'media-transform.js', 'muse-quota.js',
   'muse-task-worker.js', 'muse-window.ps1', 'dashboard.html', 'package.json',
-  'Mở K Studio.bat', 'Start-K-Studio.ps1', 'README.md', 'LOCAL_API.md',
+  $launcherBat, 'Start-K-Studio.ps1', 'README.md', 'LOCAL_API.md',
   'KSTUDIO_API_FOR_AI.md'
 )
 foreach ($file in $files) { Copy-Item -LiteralPath (Join-Path $project $file) -Destination $appStage -Force }
