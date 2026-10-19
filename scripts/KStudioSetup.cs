@@ -28,15 +28,16 @@ internal static class KStudioSetup
                 if (pending.AsyncWaitHandle.WaitOne(500) && client.Connected)
                 {
                     MessageBox.Show("K Studio đang chạy. Hãy đợi tác vụ xong, đóng K Studio rồi chạy lại bộ cài.", "K Studio Setup", MessageBoxButtons.OK, MessageBoxIcon.Warning);
+                    Environment.ExitCode = 2;
                     return;
                 }
             }
 
             var chromePath = FindChrome();
-            if (String.IsNullOrEmpty(chromePath) && !InstallChrome()) return;
+            if (String.IsNullOrEmpty(chromePath) && !InstallChrome()) { Environment.ExitCode = 3; return; }
 
             var answer = MessageBox.Show("Cài K Studio vào thư mục người dùng hiện tại? Tài khoản Muse và dữ liệu sẽ được lưu riêng, không nằm trong bộ cài.", "K Studio Setup", MessageBoxButtons.YesNo, MessageBoxIcon.Question);
-            if (answer != DialogResult.Yes) return;
+            if (answer != DialogResult.Yes) { Environment.ExitCode = 4; return; }
 
             var tempRoot = Path.Combine(Path.GetTempPath(), "KStudioSetup-" + Guid.NewGuid().ToString("N"));
             Directory.CreateDirectory(tempRoot);
@@ -77,6 +78,7 @@ internal static class KStudioSetup
         }
         catch (Exception error)
         {
+            Environment.ExitCode = 1;
             var rootError = GetRootException(error);
             var logPath = WriteSetupLog("Installation failed", error);
             MessageBox.Show("Không cài được K Studio.\r\n\r\n" + rootError.Message + "\r\n\r\nChi tiết: " + error.GetType().FullName + "\r\nNhật ký: " + logPath, "K Studio Setup", MessageBoxButtons.OK, MessageBoxIcon.Error);
@@ -154,6 +156,7 @@ if ($signature.Status -ne 'Valid' -or $signer -ne 'Google LLC') { exit 1 }
         File.WriteAllText(uninstallPath, UninstallerScript);
         CreateShortcut(Path.Combine(StartMenuRoot, "K Studio.lnk"), Path.Combine(InstallRoot, "Mở K Studio.bat"), InstallRoot, "Mở K Studio");
         CreateShortcut(Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.DesktopDirectory), "K Studio.lnk"), Path.Combine(InstallRoot, "Mở K Studio.bat"), InstallRoot, "Mở K Studio");
+        CreateShortcut(Path.Combine(StartMenuRoot, "Cập nhật K Studio.lnk"), Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.System), "WindowsPowerShell\\v1.0\\powershell.exe"), InstallRoot, "Kiểm tra và cài bản K Studio mới", "-NoProfile -NoExit -ExecutionPolicy Bypass -File \"" + Path.Combine(InstallRoot, "Update-K-Studio-Installed.ps1") + "\"");
         CreateShortcut(Path.Combine(StartMenuRoot, "Gỡ cài đặt K Studio.lnk"), Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.System), "WindowsPowerShell\\v1.0\\powershell.exe"), LocalDataRoot, "Gỡ K Studio, giữ dữ liệu Muse", "-NoProfile -ExecutionPolicy Bypass -File \"" + uninstallPath + "\"");
     }
 

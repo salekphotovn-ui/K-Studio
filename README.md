@@ -31,4 +31,6 @@ Các tệp dữ liệu, profile đăng nhập và kết quả được loại kh
 
 Mã nguồn được quản lý trong repository GitHub của K Studio. Máy phát triển có thể đẩy các bản sửa lên nhánh `main`; máy đã clone repository có thể đóng K Studio rồi chạy `Update-K-Studio.bat`. Script chỉ chấp nhận cập nhật fast-forward, không ghi đè thay đổi mã nguồn cục bộ và cài lại thư viện từ `package-lock.json`.
 
-`Update-K-Studio.bat` cập nhật bản mã nguồn bằng Git; máy đã cài bản EXE cập nhật bằng cách chạy bộ cài EXE mới nhất. Dữ liệu `%LOCALAPPDATA%\K Studio` được giữ nguyên khi cài đè.
+`Update-K-Studio.bat` chỉ cập nhật bản mã nguồn bằng Git. Máy đã cài bản EXE dùng lối tắt **Cập nhật K Studio** trong Start Menu. Lối tắt đọc bản phát hành chính thức mới nhất trên GitHub, tải bộ cài, kiểm tra SHA-256 do GitHub công bố, xác nhận hàng đợi đã kết thúc rồi mới cài đè. Người dùng xác nhận trước khi tải và trước khi cài. Dữ liệu `%LOCALAPPDATA%\K Studio` được giữ nguyên.
+
+Nếu repository phát hành là riêng tư, từng máy cần cài GitHub CLI và chạy `gh auth login` một lần bằng tài khoản có quyền truy cập. Bản cập nhật phải được phát hành chính thức (không phải Draft) và có file `K-Studio-Setup-v<version>.exe`. Máy đã cài trước khi có lối tắt này cần cài đè thủ công một lần để nhận chức năng cập nhật.

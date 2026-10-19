@@ -10,6 +10,7 @@ const { cropToAspect, parseAspectRatio } = require('./media-transform');
 const { quotaSnapshot, readMuseQuota } = require('./muse-quota');
 
 const ROOT = __dirname;
+const APP_VERSION = require('./package.json').version;
 // LOCALAPPDATA may point into an isolated app sandbox instead of the user's data.
 const DATA_ROOT = path.resolve(process.env.KSTUDIO_DATA_DIR || path.join(os.homedir(), 'AppData', 'Local', 'K Studio'));
 fs.mkdirSync(DATA_ROOT,{recursive:true});
@@ -502,7 +503,7 @@ let localApiControl=null;
 const server=http.createServer(async(req,res)=>{
   const url=new URL(req.url,'http://localhost');
   if(req.method==='GET' && url.pathname==='/api/health') return respond(res,200,{ok:true,mode:'local',museConnected:museState==='ready'});
-  if(req.method==='GET' && url.pathname==='/api/version') return respond(res,200,{version:'kstudio-localdata-v53',appVersion:require('./package.json').version,dataRoot:DATA_ROOT});
+  if(req.method==='GET' && url.pathname==='/api/version') return respond(res,200,{version:'kstudio-localdata-v53',appVersion:APP_VERSION,dataRoot:DATA_ROOT});
   if(req.method==='GET' && url.pathname==='/api/local-api/status') return respond(res,200,localApiControl?.status()||{enabled:false,listening:false,error:'API cục bộ chưa khởi động.'});
   if(req.method==='POST' && (url.pathname==='/api/local-api/reveal'||url.pathname==='/api/local-api/rotate')) {
     const origin=req.headers.origin;
@@ -661,7 +662,8 @@ const server=http.createServer(async(req,res)=>{
     const target=path.join(ROOT,requested);
     if(!fs.existsSync(target)||!fs.statSync(target).isFile()) return respond(res,404,'Not found','text/plain');
     res.writeHead(200, {'content-type':mime[path.extname(target)]||'application/octet-stream','cache-control':'no-store'});
-    return res.end(fs.readFileSync(target));
+    const content=fs.readFileSync(target);
+    return res.end(requested==='dashboard.html'?Buffer.from(content.toString('utf8').replace('__KSTUDIO_VERSION__',APP_VERSION)):content);
   }
   respond(res,405,{error:'Method not allowed'});
 });
