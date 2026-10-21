@@ -69,6 +69,19 @@ if ($listener) {
   }
 }
 
+# Check GitHub Releases each time the installed app starts. The updater returns
+# immediately when current, or asks before installing a newer release.
+$startupUpdater = Join-Path $project 'Update-K-Studio-Installed.ps1'
+if (Test-Path -LiteralPath $startupUpdater) {
+  $global:KStudioStartupUpdateInstalled = $false
+  try { & $startupUpdater -StartupCheck }
+  catch { Write-Host "Khong kiem tra duoc cap nhat; van mo K Studio hien tai. $($_.Exception.Message)" -ForegroundColor Yellow }
+  if ($global:KStudioStartupUpdateInstalled) {
+    Write-Host 'Da cap nhat K Studio. Bo cai da mo phien ban moi.' -ForegroundColor Green
+    exit 0
+  }
+}
+
 $bundledNode = Join-Path $project 'runtime\node.exe'
 $node = if (Test-Path -LiteralPath $bundledNode) { $bundledNode } else { (Get-Command node.exe -ErrorAction SilentlyContinue).Source }
 if (-not $node) {

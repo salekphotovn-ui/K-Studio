@@ -1,4 +1,6 @@
-﻿$ErrorActionPreference = 'Stop'
+param([switch]$StartupCheck)
+
+$ErrorActionPreference = 'Stop'
 $installRoot = Split-Path -Parent $MyInvocation.MyCommand.Path
 $installed = Get-Content -LiteralPath (Join-Path $installRoot 'package.json') -Raw | ConvertFrom-Json
 $currentVersion = [version]$installed.version
@@ -56,8 +58,14 @@ if (-not $asset.browser_download_url.StartsWith($expectedPrefix, [StringComparis
 
 Write-Host "Có bản mới: v$latestVersion" -ForegroundColor Green
 Assert-NoPendingJobs | Out-Null
-$answer = Read-Host 'Tải và cài bản mới? Nhập C để tiếp tục'
-if ($answer -notin @('C', 'c')) { Write-Host 'Đã hủy cập nhật.'; return }
+if ($StartupCheck) {
+  Add-Type -AssemblyName System.Windows.Forms
+  $answer = [System.Windows.Forms.MessageBox]::Show("Có K Studio v$latestVersion. Anh muốn tải và cài ngay không?", 'Có bản cập nhật K Studio', [System.Windows.Forms.MessageBoxButtons]::YesNo, [System.Windows.Forms.MessageBoxIcon]::Information)
+  if ($answer -ne [System.Windows.Forms.DialogResult]::Yes) { Write-Host 'Đã hoãn cập nhật.'; return }
+} else {
+  $answer = Read-Host 'Tải và cài bản mới? Nhập C để tiếp tục'
+  if ($answer -notin @('C', 'c')) { Write-Host 'Đã hủy cập nhật.'; return }
+}
 
 $downloadDir = Join-Path ([IO.Path]::GetTempPath()) ('KStudioUpdate-' + [guid]::NewGuid().ToString('N'))
 New-Item -ItemType Directory -Path $downloadDir -Force | Out-Null
@@ -91,6 +99,7 @@ try {
   $newPackage = Get-Content -LiteralPath (Join-Path $installRoot 'package.json') -Raw | ConvertFrom-Json
   if ([version]$newPackage.version -ne $latestVersion) { throw 'Bộ cài đã đóng nhưng phiên bản trong thư mục cài đặt chưa thay đổi.' }
   Write-Host "Đã chạy bộ cài v$latestVersion. Dữ liệu và tài khoản Muse được giữ trong thư mục người dùng." -ForegroundColor Green
+  if ($StartupCheck) { $global:KStudioStartupUpdateInstalled = $true }
 } finally {
   if (Test-Path -LiteralPath $downloadDir) { Remove-Item -LiteralPath $downloadDir -Recurse -Force -ErrorAction SilentlyContinue }
 }
