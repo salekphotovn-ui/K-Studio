@@ -21,6 +21,12 @@ K Studio giữ một Main chat Muse cho mỗi tài khoản và chỉ giao một 
 
 Mỗi máy trong team có API cục bộ với cổng và khóa riêng. Xem key trong **Cài đặt → API cục bộ cho AI khác** và đọc [LOCAL_API.md](LOCAL_API.md) để gửi lô từ script trên chính máy cài K Studio.
 
+## Chạy thử trên Mac Apple Silicon
+
+Bản Mac hiện chạy từ mã nguồn, chưa có ứng dụng `.app`/`.dmg` đã ký và công chứng. Cài Node.js LTS bản Apple Silicon và Google Chrome, tải mã nguồn K Studio về máy, rồi chạy `bash Start-K-Studio-Mac.command` trong Terminal. Lần đầu script cài thư viện; dữ liệu Muse được lưu riêng tại `~/Library/Application Support/K Studio`. Cửa sổ Muse luôn hiện trên Mac trong bản thử nghiệm này; đăng nhập từng tài khoản Muse trong cửa sổ đó. Đóng Terminal đang chạy K Studio để dừng ứng dụng.
+
+Đóng gói phát hành cho Mac cần thêm bộ tạo `.app`/`.dmg`, kiểm tra trên Mac thật, và cấu hình ký/notarize của Apple trước khi phân phối cho nhân viên. Bộ cài Windows hiện tại không dùng được trên macOS.
+
 ## Dữ liệu người dùng
 
 Từ bản này, cấu hình, lịch sử, profile Muse và ảnh tham chiếu mặc định nằm tại `%LOCALAPPDATA%\K Studio`. Kết quả mới mặc định nằm trong thư mục `output` ở đó. Khi chạy lần đầu, ứng dụng **sao chép** dữ liệu cũ từ thư mục mã nguồn nếu dữ liệu mới chưa tồn tại; dữ liệu cũ không bị xóa. Nếu trước đó đã chọn thư mục kết quả riêng, cài đặt ấy được giữ nguyên.

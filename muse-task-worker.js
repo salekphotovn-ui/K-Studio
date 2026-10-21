@@ -5,6 +5,7 @@ const { chromium } = require('playwright-core');
 const { readMuseQuota } = require('./muse-quota');
 
 function hideWindow(root, profile) {
+  if (process.platform !== 'win32') return;
   spawnSync('powershell.exe', [
     '-NoProfile', '-NonInteractive', '-ExecutionPolicy', 'Bypass',
     '-File', path.join(root, 'muse-window.ps1'), 'hide', profile, '0', '0', '1180', '850',

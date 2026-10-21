@@ -2,8 +2,8 @@ const http = require('node:http');
 const fs = require('node:fs');
 const path = require('node:path');
 const crypto = require('node:crypto');
-const os = require('node:os');
 const { spawnSync, spawn, fork } = require('node:child_process');
+const { dataRoot, findChrome, changeMuseWindowState, watchMuseWindow, openPath, chooseOutputDirectory } = require('./platform');
 const { chromium } = require('playwright-core');
 const { startLocalApi, finalizeTeamOutput } = require('./local-api');
 const { cropToAspect, parseAspectRatio } = require('./media-transform');
@@ -11,8 +11,7 @@ const { quotaSnapshot, readMuseQuota } = require('./muse-quota');
 
 const ROOT = __dirname;
 const APP_VERSION = require('./package.json').version;
-// LOCALAPPDATA may point into an isolated app sandbox instead of the user's data.
-const DATA_ROOT = path.resolve(process.env.KSTUDIO_DATA_DIR || path.join(os.homedir(), 'AppData', 'Local', 'K Studio'));
+const DATA_ROOT = dataRoot();
 fs.mkdirSync(DATA_ROOT,{recursive:true});
 function migrateLegacyData(){
   if(DATA_ROOT===ROOT)return;
@@ -33,8 +32,7 @@ migrateLegacyData();
 const PORT = Number(process.env.PORT || 4173);
 const batches = new Map();
 const MUSE_PROFILE = path.join(DATA_ROOT, '.muse-chrome-profile');
-const CHROME_CANDIDATES = [process.env.KSTUDIO_CHROME_PATH,path.join(process.env.PROGRAMFILES||'C:\\Program Files','Google','Chrome','Application','chrome.exe'),path.join(process.env['PROGRAMFILES(X86)']||'C:\\Program Files (x86)','Google','Chrome','Application','chrome.exe'),process.env.LOCALAPPDATA&&path.join(process.env.LOCALAPPDATA,'Google','Chrome','Application','chrome.exe')].filter(Boolean);
-const CHROME_PATH = CHROME_CANDIDATES.find(candidate=>fs.existsSync(candidate));
+const CHROME_PATH = findChrome();
 const MUSE_LOGIN_VIEWPORT = { width:780, height:530 };
 const MUSE_READY_VIEWPORT = { width:1160, height:740 };
 const HISTORY_FILE = path.join(DATA_ROOT, 'history.json');
@@ -202,7 +200,7 @@ function respond(res, status, body, type='application/json; charset=utf-8') {
 }
 function outputRootDir(){const configured=path.resolve(settings.outputDir||DEFAULT_SETTINGS.outputDir);return path.basename(configured).toLowerCase()==='images'?path.dirname(configured):configured}
 function resolveOutputFile(value){const root=outputRootDir(),relative=String(value||'').trim();if(!relative)return null;const target=path.resolve(root,relative),fromRoot=path.relative(root,target);if(fromRoot==='..'||fromRoot.startsWith(`..${path.sep}`)||path.isAbsolute(fromRoot))return null;return target}
-function openInExplorer(target,selectFile=false){return new Promise((resolve,reject)=>{const argument=selectFile?`/select,${target}`:target,child=spawn('explorer.exe',[argument],{detached:true,stdio:'ignore',windowsHide:false});child.once('error',reject);child.once('spawn',()=>{child.unref();resolve()})})}
+function openInExplorer(target,selectFile=false){return openPath(target,selectFile)}
 function bodyJson(req) {
   return new Promise((resolve, reject) => {
     const chunks=[];let bytes=0,tooLarge=false;req.on('data',chunk=>{bytes+=chunk.length;if(bytes>90_000_000){tooLarge=true;reject(new Error('Dữ liệu tải lên quá lớn (giới hạn tổng 90 MB).'));req.destroy();return}chunks.push(chunk)});
@@ -241,7 +239,7 @@ async function connectMuse(accountId='default', hidden=false) {
         headless: false,
         // Keep the Muse login window compact so it can sit beside K Studio.
         viewport: MUSE_LOGIN_VIEWPORT,
-        args: ['--window-size=800,600', ...(hidden ? ['--start-minimized'] : [])],
+        args: ['--window-size=800,600', ...(hidden && process.platform === 'win32' ? ['--start-minimized'] : [])],
         acceptDownloads: true,
       });
       const launchedContext = museContext;
@@ -272,6 +270,7 @@ async function connectMuse(accountId='default', hidden=false) {
 }
 async function setMuseWindowState(windowState) {
   if(!museContext) return false;
+  if(process.platform!=='win32')return changeMuseWindowState(windowState);
   try {
     const account=accounts.find(a=>a.id===museAccountId);
     if(!account)return false;
@@ -298,6 +297,7 @@ async function stopMuseWindowWatcher() {
   });
 }
 function startMuseWindowWatcher(profile) {
+  if(process.platform!=='win32')return;
   if(museWindowWatcher?.profile===profile&&museWindowWatcher.child.exitCode===null&&!museWindowWatcher.child.killed)return;
   const child=spawn('powershell.exe',['-NoProfile','-NonInteractive','-ExecutionPolicy','Bypass','-File',path.join(ROOT,'muse-window.ps1'),'watch',profile,'0',String(process.pid)],{windowsHide:true,stdio:'ignore'});
   museWindowWatcher={child,profile};
@@ -503,7 +503,7 @@ let localApiControl=null;
 const server=http.createServer(async(req,res)=>{
   const url=new URL(req.url,'http://localhost');
   if(req.method==='GET' && url.pathname==='/api/health') return respond(res,200,{ok:true,mode:'local',museConnected:museState==='ready'});
-  if(req.method==='GET' && url.pathname==='/api/version') return respond(res,200,{version:'kstudio-localdata-v53',appVersion:APP_VERSION,dataRoot:DATA_ROOT});
+  if(req.method==='GET' && url.pathname==='/api/version') return respond(res,200,{version:'kstudio-localdata-v53',appVersion:APP_VERSION,dataRoot:DATA_ROOT,platform:process.platform,architecture:process.arch});
   if(req.method==='GET' && url.pathname==='/api/local-api/status') return respond(res,200,localApiControl?.status()||{enabled:false,listening:false,error:'API cục bộ chưa khởi động.'});
   if(req.method==='POST' && (url.pathname==='/api/local-api/reveal'||url.pathname==='/api/local-api/rotate')) {
     const origin=req.headers.origin;
@@ -550,12 +550,11 @@ const server=http.createServer(async(req,res)=>{
     return respond(res,200,{directory:dir,files});
   }
   if(req.method==='POST' && url.pathname==='/api/choose-output') {
-    const script = "Add-Type -AssemblyName System.Windows.Forms; $d=New-Object System.Windows.Forms.FolderBrowserDialog; $d.Description='Chọn thư mục lưu kết quả Muse Studio'; if($d.ShowDialog() -eq [System.Windows.Forms.DialogResult]::OK){[Console]::Write($d.SelectedPath)}";
-    const result=spawnSync('powershell.exe',['-NoProfile','-STA','-Command',script],{encoding:'utf8',windowsHide:false,timeout:120000});
-    if(result.error) return respond(res,500,{error:result.error.message});
-    const selected=(result.stdout||'').trim(); if(result.status!==0) return respond(res,500,{error:(result.stderr||'Không mở được hộp thoại chọn thư mục.').trim()});
-    if(selected){settings.outputDir=path.resolve(selected);persistSettings();}
-    return respond(res,200,{cancelled:!selected,outputDir:settings.outputDir});
+    try {
+      const selected=chooseOutputDirectory();
+      if(selected){settings.outputDir=path.resolve(selected);persistSettings();}
+      return respond(res,200,{cancelled:!selected,outputDir:settings.outputDir});
+    } catch(error) { return respond(res,500,{error:error.message}); }
   }
   if(req.method==='POST' && url.pathname==='/api/open-output') { try { const dir=outputRootDir();fs.mkdirSync(dir,{recursive:true});await openInExplorer(dir);return respond(res,200,{ok:true}); } catch(e) { return respond(res,500,{error:e.message}); } }
   if(req.method==='POST' && url.pathname==='/api/open-image-folder') { try { const dir=imageOutputDir();fs.mkdirSync(dir,{recursive:true});await openInExplorer(dir);return respond(res,200,{ok:true,path:dir}); } catch(e) { return respond(res,500,{error:e.message}); } }
