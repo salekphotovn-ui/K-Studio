@@ -53,7 +53,7 @@ Kiểm tra app và tài khoản.
 | `job_id` | có | Do client đặt. Gửi lại cùng `job_id` thì trả về lô cũ, không tạo trùng |
 | `type` | có | `video` hoặc `image` |
 | `account` | không | Tên tài khoản, hoặc `"auto"` để app tự luân phiên khi hết hạn mức hoặc bị Meta ngắt |
-| `workers` | không | Ảnh tối đa 3, video tối đa 5. Mỗi luồng dùng một tài khoản riêng |
+| `workers` | không | Ảnh và video tối đa 5. Mỗi luồng dùng một tài khoản riêng |
 | `aspect_ratio` | không | Mặc định `16:9`. **Phải áp dụng đúng cho mọi item** (hiện giao diện tự quay về 9:16 sau mỗi lần chạy) |
 | `output_dir` | có | App tự tạo thư mục nếu chưa có |
 | `skip_existing` | không | Mặc định `true`: bỏ qua item đã có `<id>.mp4` |

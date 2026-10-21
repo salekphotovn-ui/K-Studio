@@ -17,7 +17,7 @@ Gỡ K Studio bằng lối tắt **Gỡ cài đặt K Studio** trong Start Menu.
 Để dùng `aspect_ratio` trong API cục bộ, cài FFmpeg gồm `ffmpeg` và `ffprobe` vào `PATH`, hoặc đặt biến `KSTUDIO_FFMPEG_PATH` và `KSTUDIO_FFPROBE_PATH` trỏ tới hai file thực thi.
 
 Máy chủ chỉ nghe tại `127.0.0.1:4173`. Tài khoản Muse được đăng nhập riêng trong Chrome do ứng dụng mở.
-K Studio giữ một Main chat Muse cho mỗi tài khoản và chỉ giao một tác vụ cho mỗi tài khoản tại một thời điểm. Ảnh chạy tối đa 3 tài khoản; video chạy tối đa 5 tài khoản. Lô hỗn hợp xử lý ảnh trước rồi mới chuyển sang video. Cửa sổ đăng nhập nhỏ gọn; khi chạy hàng đợi, các cửa sổ Muse được ẩn.
+K Studio giữ một Main chat Muse cho mỗi tài khoản và chỉ giao một tác vụ cho mỗi tài khoản tại một thời điểm. Ảnh và video đều chạy tối đa 5 tài khoản. Lô hỗn hợp xử lý ảnh trước rồi mới chuyển sang video. Cửa sổ đăng nhập nhỏ gọn; khi chạy hàng đợi, các cửa sổ Muse được ẩn trên Windows.
 
 Mỗi máy trong team có API cục bộ với cổng và khóa riêng. Xem key trong **Cài đặt → API cục bộ cho AI khác** và đọc [LOCAL_API.md](LOCAL_API.md) để gửi lô từ script trên chính máy cài K Studio.
 

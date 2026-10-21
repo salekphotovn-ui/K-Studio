@@ -27,7 +27,7 @@ Quy tắc bảo mật:
 
 ## 2. Cấu hình xử lý
 
-- Ảnh: tối đa `3` tài khoản chạy song song.
+- Ảnh: tối đa `5` tài khoản chạy song song.
 - Video: tối đa `5` tài khoản chạy song song.
 - Mỗi tài khoản chỉ xử lý một tác vụ tại một thời điểm.
 - Mỗi tài khoản dùng Chrome profile và Main chat Muse riêng.
@@ -68,7 +68,7 @@ Mẫu request:
   "job_id": "project-images-001",
   "type": "image",
   "account": "auto",
-  "workers": 3,
+  "workers": 5,
   "output_dir": "D:/PROJECT/output/images",
   "skip_existing": true,
   "max_retries": 1,
@@ -224,7 +224,7 @@ Tác vụ đang chạy có thể hoàn thành; các tác vụ chưa chạy sẽ 
 ## 10. Quy trình chuẩn cho dự án ảnh và video
 
 1. Gọi `GET /api/health`.
-2. Gửi toàn bộ prompt ảnh bằng một `POST /api/jobs`, `type: image`, `workers: 3`.
+2. Gửi toàn bộ prompt ảnh bằng một `POST /api/jobs`, `type: image`, `workers: 5`.
 3. Chờ lô ảnh bằng `GET /api/jobs/{job_id}?wait=1800&full=1`.
 4. Thử lại các ảnh lỗi trong cùng lô.
 5. Xác định chính xác file ảnh của từng `items[].id`.
@@ -240,7 +240,7 @@ Dùng K Studio API tại http://127.0.0.1:4174.
 Đọc key từ %LOCALAPPDATA%\K Studio\local-api.json và gửi trong header X-Api-Key; không in key ra câu trả lời.
 Kiểm tra GET /api/health trước.
 Gửi toàn bộ cảnh theo lô qua POST /api/jobs.
-Dùng account:auto, ảnh workers:3, video workers:5, max_retries:1 và không đặt ngưỡng hạn mức.
+Dùng account:auto, ảnh workers:5, video workers:5, max_retries:1 và không đặt ngưỡng hạn mức.
 Video phải ghép từng items[].image với đúng items[].prompt.
 Chờ bằng GET /api/jobs/{job_id}?wait=1800&full=1.
 Chỉ retry item failed; có thể sửa prompt bằng trường items trong request retry.

@@ -164,7 +164,7 @@ function startLocalApi(deps) {
         const type = data.type === 'video' ? 'Video' : data.type === 'image' ? 'Ảnh' : null;
         if (!type) return send(res, 400, { error: 'type phải là image hoặc video.' });
         const requestedWorkers = data.workers == null ? null : Number(data.workers);
-        const workerMaximum = type === 'Video' ? 5 : 3;
+        const workerMaximum = 5;
         if (requestedWorkers != null && (!Number.isInteger(requestedWorkers) || requestedWorkers < 1 || requestedWorkers > workerMaximum)) return send(res, 422, { error: `workers của ${type === 'Video' ? 'video' : 'ảnh'} phải là số nguyên từ 1 đến ${workerMaximum}.` });
         if (!Array.isArray(data.items) || !data.items.length || data.items.length > 300) return send(res, 400, { error: 'Mỗi lô cần 1–300 item.' });
         if (data.items.filter(item => item.image_data != null).length > 10) return send(res, 400, { error: 'Tối đa 10 ảnh base64 mỗi lô; dùng đường dẫn image trên máy cho lô lớn.' });
