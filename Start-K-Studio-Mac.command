@@ -32,6 +32,6 @@ fi
 node server.js &
 server_pid=$!
 sleep 2
-open "http://127.0.0.1:4173/"
+open -a "Google Chrome" "http://127.0.0.1:4173/"
 echo "K Studio đang chạy. Đóng cửa sổ này hoặc nhấn Ctrl+C để dừng."
 wait "$server_pid"
