@@ -271,7 +271,7 @@ async function connectMuse(accountId='default', hidden=false) {
         headless: false,
         // Keep the Muse login window compact so it can sit beside K Studio.
         viewport: MUSE_LOGIN_VIEWPORT,
-        args: ['--window-size=800,600', ...(hidden ? ['--start-minimized'] : [])],
+        args: ['--window-size=800,600', ...(hidden ? ['--window-position=-32000,-32000','--start-minimized'] : [])],
         acceptDownloads: true,
       });
       // Startup quota/session reads should stay out of sight for saved sessions.

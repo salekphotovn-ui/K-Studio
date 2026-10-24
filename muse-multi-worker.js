@@ -132,7 +132,8 @@ async function run(payload) {
     executablePath: payload.chromePath,
     headless: false,
     viewport: { width: 1160, height: 740 },
-    args: ['--window-size=1180,850', '--start-minimized'],
+    // Keep the first about:blank window off-screen before the hide script can run.
+    args: ['--window-size=1180,850', '--window-position=-32000,-32000', '--start-minimized'],
     acceptDownloads: true,
   });
   try {
