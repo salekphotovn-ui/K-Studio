@@ -69,6 +69,8 @@ function checkError(response) {
 
 async function runTask(page, payload) {
   await page.goto(payload.chatUrl || 'https://muse.ai/thread/new', { waitUntil: 'domcontentloaded' });
+  // Chrome may restore the window after navigation even when it started minimized.
+  hideWindow(payload.root, payload.profileDir);
   const textbox = page.getByRole('textbox', { name: /Message/i }).first();
   try { await textbox.waitFor({ state: 'visible', timeout: 30000 }); }
   catch { throw Object.assign(new Error('Phiên Muse cần đăng nhập lại.'), { code: 'MUSE_LOGIN_REQUIRED' }); }
