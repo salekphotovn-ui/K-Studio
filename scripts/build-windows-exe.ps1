@@ -17,7 +17,7 @@ New-Item -ItemType Directory -Path $appStage -Force | Out-Null
 
 $files = @(
   'server.js', 'local-api.js', 'media-transform.js', 'muse-quota.js',
-  'muse-task-worker.js', 'muse-window.ps1', 'dashboard.html', 'package.json',
+  'muse-task-worker.js', 'muse-multi-worker.js', 'muse-window.ps1', 'dashboard.html', 'package.json',
   $launcherBat, 'Start-K-Studio.ps1', 'Update-K-Studio-Installed.ps1', 'README.md', 'LOCAL_API.md',
   'KSTUDIO_API_FOR_AI.md'
 )

@@ -73,7 +73,7 @@ async function run(payload) {
   try {
     hideWindow(payload.root, payload.profileDir);
     const page = context.pages()[0] || await context.newPage();
-    await page.goto('https://muse.ai/', { waitUntil: 'domcontentloaded' });
+    await page.goto(payload.chatUrl || 'https://muse.ai/thread/new', { waitUntil: 'domcontentloaded' });
     hideWindow(payload.root, payload.profileDir);
     const textbox = page.getByRole('textbox', { name: /Message/i }).first();
     try { await textbox.waitFor({ state: 'visible', timeout: 30000 }); }
@@ -122,7 +122,7 @@ async function run(payload) {
     const tempPath = path.join(payload.tempDir, `${payload.jobId}${extension}`);
     await download.saveAs(tempPath);
     const quota = await readMuseQuota(page).catch(() => null);
-    return { ok: true, tempPath, quota };
+    return { ok: true, tempPath, quota, chatUrl: page.url() };
   } finally {
     await context.close().catch(() => {});
   }

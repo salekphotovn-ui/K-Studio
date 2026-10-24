@@ -1,0 +1,125 @@
+const fs = require('node:fs');
+const path = require('node:path');
+const { spawnSync } = require('node:child_process');
+const { chromium } = require('playwright-core');
+const { readMuseQuota } = require('./muse-quota');
+
+function hideWindow(root, profile) {
+  if (process.platform !== 'win32') return;
+  spawnSync('powershell.exe', ['-NoProfile', '-NonInteractive', '-ExecutionPolicy', 'Bypass', '-File', path.join(root, 'muse-window.ps1'), 'hide', profile, '0', '0', '1180', '850'], { windowsHide: true, encoding: 'utf8', timeout: 12000 });
+}
+
+async function responseForPrompt(page, prompt) {
+  return page.evaluate(promptText => {
+    const normalize = value => String(value || '').replace(/\s+/g, ' ').trim();
+    const needle = normalize(promptText);
+    for (const container of document.querySelectorAll('[class*="max-w-3xl"]')) {
+      const rows = [...container.children];
+      let promptIndex = -1;
+      for (let index = 0; index < rows.length; index++) {
+        const text = normalize(rows[index].innerText);
+        if (text.startsWith('You:') && text.includes(needle)) promptIndex = index;
+      }
+      if (promptIndex < 0) continue;
+      let end = rows.length;
+      for (let index = promptIndex + 1; index < rows.length; index++) if (normalize(rows[index].innerText).startsWith('You:')) { end = index; break; }
+      const replies = rows.slice(promptIndex + 1, end);
+      const buttons = replies.flatMap(row => [...row.querySelectorAll('button[aria-label]')]);
+      const images = [...document.querySelectorAll('button[aria-label^="Open generated image"]')];
+      const videos = [...document.querySelectorAll('button[aria-label^="Open generated video"],button[aria-label^="Open animated video"]')];
+      const downloads = [...document.querySelectorAll('button[aria-label="Download video"]')];
+      const image = buttons.filter(button => images.includes(button)).at(-1);
+      const video = buttons.filter(button => videos.includes(button)).at(-1);
+      const direct = buttons.filter(button => downloads.includes(button)).at(-1);
+      return { matched: true, replyText: replies.map(row => row.innerText || '').join('\n').slice(0, 3000), imageIndex: image ? images.indexOf(image) : -1, videoIndex: video ? videos.indexOf(video) : -1, directDownloadIndex: direct ? downloads.indexOf(direct) : -1 };
+    }
+    return { matched: false, replyText: '', imageIndex: -1, videoIndex: -1, directDownloadIndex: -1 };
+  }, prompt);
+}
+
+function checkError(response) {
+  const text = response.replyText || '';
+  if (/weekly limit|usage limit|out of tokens|not enough tokens|hết token|hết hạn mức/i.test(text)) throw Object.assign(new Error('Muse báo hết token hoặc hạn mức.'), { code: 'MUSE_QUOTA' });
+  const match = text.match(/something went wrong|generation failed|failed to generate|please try again later|temporarily unavailable|không thể tạo|không tạo được|gặp trục trặc khi tạo|tạo nội dung thất bại|đã xảy ra lỗi/i);
+  if (match) throw Object.assign(new Error(`Muse báo lỗi tạo nội dung: ${text.slice(match.index, match.index + 300).trim()}`), { code: 'MUSE_GENERATION_FAILED' });
+}
+
+async function runTask(page, payload) {
+  await page.goto(payload.chatUrl || 'https://muse.ai/thread/new', { waitUntil: 'domcontentloaded' });
+  const textbox = page.getByRole('textbox', { name: /Message/i }).first();
+  try { await textbox.waitFor({ state: 'visible', timeout: 30000 }); }
+  catch { throw Object.assign(new Error('Phiên Muse cần đăng nhập lại.'), { code: 'MUSE_LOGIN_REQUIRED' }); }
+  if (payload.referenceImagePath) {
+    const attach = page.locator('button[aria-label="Attach file"]').first();
+    if (!await attach.count()) throw new Error('Không tìm thấy nút đính kèm ảnh trên Muse.');
+    const chooserPromise = page.waitForEvent('filechooser', { timeout: 10000 });
+    await attach.click();
+    await (await chooserPromise).setFiles(payload.referenceImagePath);
+    await page.getByRole('button', { name: 'Remove attachment', exact: true }).first().waitFor({ state: 'visible', timeout: 15000 });
+    await page.waitForTimeout(700);
+  }
+  await textbox.fill(payload.prompt);
+  await page.getByRole('button', { name: 'Send', exact: true }).click();
+  const deadline = Date.now() + payload.timeoutMs;
+  let response;
+  while (Date.now() < deadline) {
+    response = await responseForPrompt(page, payload.prompt);
+    if (response.matched) {
+      checkError(response);
+      if (payload.type === 'Ảnh' ? response.imageIndex >= 0 : response.videoIndex >= 0 || response.directDownloadIndex >= 0) break;
+    }
+    await page.waitForTimeout(1200);
+  }
+  const ready = response && (payload.type === 'Ảnh' ? response.imageIndex >= 0 : response.videoIndex >= 0 || response.directDownloadIndex >= 0);
+  if (!ready) throw new Error(`Muse chưa hiện ${payload.type.toLowerCase()} gắn với prompt này trong thời gian chờ tối đa.`);
+  let button;
+  let openedDialog = false;
+  if (payload.type === 'Ảnh') {
+    await page.getByRole('button', { name: /Open generated image/i }).nth(response.imageIndex).click();
+    button = page.getByRole('button', { name: 'Download', exact: true });
+    openedDialog = true;
+  } else if (response.directDownloadIndex >= 0) button = page.locator('button[aria-label="Download video"]').nth(response.directDownloadIndex);
+  else {
+    await page.getByRole('button', { name: /Open (?:generated|animated) video/i }).nth(response.videoIndex).click();
+    button = page.getByRole('button', { name: /Download/i }).last();
+    openedDialog = true;
+  }
+  await button.waitFor({ state: 'visible', timeout: 15000 });
+  const downloadPromise = page.waitForEvent('download', { timeout: 60000 });
+  await button.click();
+  const download = await downloadPromise;
+  fs.mkdirSync(payload.tempDir, { recursive: true });
+  const extension = path.extname(download.suggestedFilename()) || (payload.type === 'Ảnh' ? '.webp' : '.mp4');
+  const tempPath = path.join(payload.tempDir, `${payload.jobId}${extension}`);
+  await download.saveAs(tempPath);
+  if (openedDialog) await page.getByRole('button', { name: 'Close' }).last().click().catch(() => {});
+  const quota = await readMuseQuota(page).catch(() => null);
+  return { jobId: payload.jobId, lane: payload.lane, ok: true, tempPath, quota, chatUrl: page.url() };
+}
+
+async function run(payload) {
+  const context = await chromium.launchPersistentContext(payload.profileDir, {
+    executablePath: payload.chromePath,
+    headless: false,
+    viewport: { width: 1160, height: 740 },
+    args: ['--window-size=1180,850', '--start-minimized'],
+    acceptDownloads: true,
+  });
+  try {
+    hideWindow(payload.root, payload.profileDir);
+    const tasks = payload.tasks || [];
+    const pages = [];
+    for (let index = 0; index < tasks.length; index++) pages.push(index === 0 && context.pages()[0] ? context.pages()[0] : await context.newPage());
+    const results = await Promise.all(tasks.map(async (task, index) => {
+      try { const result = await runTask(pages[index], { ...task, tempDir: payload.tempDir }); process.send?.({ kind: 'job', result }); return result; }
+      catch (error) { const result = { jobId: task.jobId, lane: task.lane, ok: false, error: error.message, code: error.code || 'KSTUDIO_ERROR', chatUrl: pages[index]?.url() }; process.send?.({ kind: 'job', result }); return result; }
+    }));
+    return { ok: true, results };
+  } finally { await context.close().catch(() => {}); }
+}
+
+process.on('message', async payload => {
+  try { process.send(await run(payload)); }
+  catch (error) { process.send({ ok: false, error: error.message, code: error.code || 'KSTUDIO_ERROR' }); }
+  finally { process.disconnect(); }
+});

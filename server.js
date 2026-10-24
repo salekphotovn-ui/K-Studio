@@ -42,11 +42,9 @@ const SETTINGS_FILE = path.join(DATA_ROOT, 'settings.json');
 const ACCOUNTS_FILE = path.join(DATA_ROOT, 'accounts.json');
 const ACCOUNTS_BACKUP_FILE = path.join(DATA_ROOT, 'accounts.backup.json');
 const REFERENCE_DIR = path.join(DATA_ROOT, '.uploads', 'references');
-const MAX_WORKERS = 10;
-const DEFAULT_SETTINGS = { outputDir: path.join(DATA_ROOT, 'output'), imageWorkers: MAX_WORKERS, videoWorkers: MAX_WORKERS, imageTimeout: 6, videoTimeout: 12, promptSeparator: '', allowedDomainsEnabled: true, allowedDomains: 'huggingface.co', autoReservePercent: 5, imageAccountId: '', videoAccountMode: 'all' };
+const MAX_WORKERS_PER_ACCOUNT = 2;
+const DEFAULT_SETTINGS = { outputDir: path.join(DATA_ROOT, 'output'), imageWorkers: 2, videoWorkers: 2, workerCountMode: 'auto', imageTimeout: 6, videoTimeout: 12, promptSeparator: '', allowedDomainsEnabled: true, allowedDomains: 'huggingface.co', autoReservePercent: 5, imageAccountId: '', videoAccountMode: 'all' };
 const outputReservations = new Set();
-let settings = { ...DEFAULT_SETTINGS };
-try { settings = { ...settings, ...JSON.parse(fs.readFileSync(SETTINGS_FILE, 'utf8')) }; } catch {}
 let accounts = [{ id:'default', name:'Tài khoản Muse', enabled:true, primary:true, profileDir:MUSE_PROFILE, createdAt:new Date().toISOString() }];
 const accountSources=[ACCOUNTS_FILE,ACCOUNTS_BACKUP_FILE,path.join(ROOT,'accounts.json')].map(source=>{
   try{const saved=JSON.parse(fs.readFileSync(source,'utf8'));return Array.isArray(saved)&&saved.length?{source,saved}:null}catch{return null}
@@ -55,6 +53,17 @@ if(accountSources.length)accounts=accountSources[0].saved;
 const initialPrimaryIndex=accounts.findIndex(account=>account.primary);
 if(initialPrimaryIndex>0)accounts.unshift(accounts.splice(initialPrimaryIndex,1)[0]);
 for(const account of accounts)account.profileDir=account.id==='default'?MUSE_PROFILE:path.join(DATA_ROOT,'.muse-profiles',account.id);
+let settings = { ...DEFAULT_SETTINGS };
+try { settings = { ...settings, ...JSON.parse(fs.readFileSync(SETTINGS_FILE, 'utf8')) }; } catch {}
+function maximumWorkersForAccounts(list=accounts.filter(account=>account.enabled)){return Math.max(1,list.length*MAX_WORKERS_PER_ACCOUNT)}
+if(Number(settings.multiLaneVersion||0)<2){
+  const capacity=maximumWorkersForAccounts();
+  settings.imageWorkers=capacity;
+  settings.videoWorkers=capacity;
+  settings.workerCountMode='auto';
+  settings.multiLaneVersion=2;
+  persistSettings();
+}
 let museContext = null;
 let musePage = null;
 let museAccountId = 'default';
@@ -79,10 +88,8 @@ function persistHistory() {
   fs.writeFileSync(HISTORY_FILE,JSON.stringify(all.filter(b=>b.externalJobId||!['Hoàn tất','Hoàn tất, có lỗi','Lỗi'].includes(b.status)||finished.has(b.id)),null,2),'utf8');
 }
 function persistSettings() { fs.writeFileSync(SETTINGS_FILE, JSON.stringify(settings, null, 2), 'utf8'); }
-if(Number(settings.imageWorkerLimitVersion||0)<5){if(Number(settings.imageWorkers)===3)settings.imageWorkers=5;settings.imageWorkerLimitVersion=5;persistSettings()}
-if(Number(settings.workerLimitVersion||0)<1){settings.imageWorkers=MAX_WORKERS;settings.videoWorkers=MAX_WORKERS;settings.workerLimitVersion=1;persistSettings()}
-settings.imageWorkers=Math.max(1,Math.min(MAX_WORKERS,Number(settings.imageWorkers)||DEFAULT_SETTINGS.imageWorkers));
-settings.videoWorkers=Math.max(1,Math.min(MAX_WORKERS,Number(settings.videoWorkers)||DEFAULT_SETTINGS.videoWorkers));
+settings.imageWorkers=Math.max(1,Math.min(maximumWorkersForAccounts(),Number(settings.imageWorkers)||DEFAULT_SETTINGS.imageWorkers));
+settings.videoWorkers=Math.max(1,Math.min(maximumWorkersForAccounts(),Number(settings.videoWorkers)||DEFAULT_SETTINGS.videoWorkers));
 function persistAccounts() {
   fs.mkdirSync(path.dirname(ACCOUNTS_FILE),{recursive:true});
   const serialized=JSON.stringify(accounts,null,2);
@@ -165,6 +172,17 @@ function accountsForType(type){
   if(type==='Ảnh'&&settings.imageAccountId){const preferred=enabled.find(account=>account.id===settings.imageAccountId);return preferred?[preferred,...enabled.filter(account=>account.id!==preferred.id)]:enabled}
   if(type==='Video'&&settings.videoAccountMode==='exclude-image-account'&&settings.imageAccountId)return enabled.filter(account=>account.id!==settings.imageAccountId);
   return enabled;
+}
+function accountHasSavedSession(account){
+  const profile=account.profileDir||path.join(DATA_ROOT,'.muse-profiles',account.id);
+  return fs.existsSync(path.join(profile,'Default','Network','Cookies'))||fs.existsSync(path.join(profile,'Default','Cookies'));
+}
+function workerCapacityForType(type){return Math.max(1,accountsForType(type).filter(account=>accountAvailable(account)&&(accountHasSavedSession(account)||(museState==='ready'&&museAccountId===account.id))).length*MAX_WORKERS_PER_ACCOUNT)}
+function syncAutomaticWorkerCapacity(){
+  if(settings.workerCountMode!=='auto')return;
+  settings.imageWorkers=workerCapacityForType('Ảnh');
+  settings.videoWorkers=workerCapacityForType('Video');
+  persistSettings();
 }
 function quotaCostBuffer(account,type){return type==='Video'?Math.max(4,Number(account.videoCostBufferPct)||0):Math.max(1,Number(account.imageCostBufferPct)||0)}
 function scheduleResume(){
@@ -325,6 +343,7 @@ async function watchMuseLogin() {
     await musePage.setViewportSize(MUSE_READY_VIEWPORT);
     const account=accounts.find(a=>a.id===museAccountId);
     if(account)await refreshAccountQuota(musePage,account);
+    syncAutomaticWorkerCapacity();
     if(!await setMuseWindowState('hidden'))throw new Error('Không ẩn được cửa sổ Muse sau khi đăng nhập.');
     resumePausedBatches();
   } catch(error) { museState='error';console.error('Muse login watch:',error.message); }
@@ -441,7 +460,28 @@ function runMuseTaskProcess(account,job){
       if(result?.ok)return finish(null,result);
       finish(Object.assign(new Error(result?.error||'Muse không trả kết quả.'),{code:result?.code||'KSTUDIO_ERROR'}));
     });
-    child.send({root:ROOT,chromePath:CHROME_PATH,profileDir:account.profileDir,prompt:job.prompt,type:job.type,referenceImagePath:job.referenceImagePath||null,timeoutMs:(job.type==='Ảnh'?settings.imageTimeout:settings.videoTimeout)*60_000,tempDir:path.join(DATA_ROOT,'.downloads'),jobId:job.id});
+    const lane=Number.isInteger(job.lane)?job.lane:0;
+    child.send({root:ROOT,chromePath:CHROME_PATH,profileDir:account.profileDir,chatUrl:account.sideChatUrls?.[lane]||'https://muse.ai/thread/new',prompt:job.prompt,type:job.type,referenceImagePath:job.referenceImagePath||null,timeoutMs:(job.type==='Ảnh'?settings.imageTimeout:settings.videoTimeout)*60_000,tempDir:path.join(DATA_ROOT,'.downloads'),jobId:job.id});
+  });
+}
+function runMuseTasksProcess(account,tasks){
+  return new Promise((resolve,reject)=>{
+    const child=fork(path.join(ROOT,'muse-multi-worker.js'),[],{silent:true});
+    activeWorkerChildren.add(child);
+    let stderr='',settled=false;
+    const results=new Map();
+    child.stderr?.on('data',chunk=>{stderr=(stderr+chunk.toString()).slice(-4000)});
+    const timeout=Math.max(...tasks.map(({job})=>(job.type==='Ảnh'?settings.imageTimeout:settings.videoTimeout)));
+    const timer=setTimeout(()=>{child.kill();finish(null,tasks.map(({job,lane})=>results.get(job.id)||{jobId:job.id,lane,ok:false,error:'Tiến trình Muse vượt quá thời gian chờ.',code:'MUSE_WORKER_TIMEOUT'}))},(timeout+3)*60_000);
+    const finish=(error,value)=>{if(settled)return;settled=true;clearTimeout(timer);activeWorkerChildren.delete(child);error?reject(error):resolve(value)};
+    child.once('error',error=>finish(error));
+    child.once('exit',code=>{if(!settled)finish(null,tasks.map(({job,lane})=>results.get(job.id)||{jobId:job.id,lane,ok:false,error:stderr||`Tiến trình Muse dừng với mã ${code}.`,code:'MUSE_WORKER_EXIT'}))});
+    child.on('message',message=>{
+      if(message?.kind==='job'&&message.result?.jobId){results.set(message.result.jobId,message.result);return}
+      if(message?.ok&&Array.isArray(message.results))finish(null,message.results);
+      else if(message?.ok===false)finish(null,tasks.map(({job,lane})=>results.get(job.id)||{jobId:job.id,lane,ok:false,error:message.error||'Muse không trả kết quả.',code:message.code||'KSTUDIO_ERROR'}));
+    });
+    child.send({root:ROOT,chromePath:CHROME_PATH,profileDir:account.profileDir,tempDir:path.join(DATA_ROOT,'.downloads'),tasks:tasks.map(({job,lane})=>({jobId:job.id,lane,prompt:job.prompt,type:job.type,referenceImagePath:job.referenceImagePath||null,chatUrl:account.sideChatUrls?.[lane]||'https://muse.ai/thread/new',timeoutMs:(job.type==='Ảnh'?settings.imageTimeout:settings.videoTimeout)*60_000}))});
   });
 }
 function applyWorkerQuota(account,quota){
@@ -465,36 +505,50 @@ async function runMuseBatch(batch) {
     for(const type of presentTypes){
       if(batch.cancelRequested)break;
       const pending=batch.jobs.filter(job=>job.type===type&&job.status==='Trong hàng đợi');
-      const eligible=accountsForType(type).filter(account=>accountAvailable(account)&&(!batch.strictAccount||account.id===batch.accountId));
+      const eligible=accountsForType(type).filter(account=>accountAvailable(account)&&(accountHasSavedSession(account)||(museState==='ready'&&museAccountId===account.id))&&(!batch.strictAccount||account.id===batch.accountId));
       const start=Math.max(0,eligible.findIndex(account=>account.id===batch.accountId));
       const ordered=start>0?[...eligible.slice(start),...eligible.slice(0,start)]:eligible;
-      const configured=type==='Ảnh'?settings.imageWorkers:settings.videoWorkers;
+      const configured=settings.workerCountMode==='auto'?workerCapacityForType(type):(type==='Ảnh'?settings.imageWorkers:settings.videoWorkers);
       const requested=presentTypes.length===1?(batch.workers||configured):configured;
-      const maximum=MAX_WORKERS;
-      const pool=ordered.slice(0,Math.min(maximum,requested,pending.length));
+      const slots=Math.min(workerCapacityForType(type),requested,pending.length);
+      const pool=ordered.slice(0,Math.min(ordered.length,slots));
       if(!pool.length){batch.status='Tạm dừng: thiếu tài khoản phù hợp';batch.error=type==='Ảnh'?'Không có tài khoản Muse đang bật để tạo ảnh.':'Không có tài khoản Muse phù hợp để tạo video.';persistHistory();return}
-      batch.workers=Math.max(batch.workers||0,pool.length);batch.activeAccountId=pool[0].id;
+      const extra=Math.min(pool.length,Math.max(0,slots-pool.length));
+      const laneCounts=pool.map((_,index)=>index<extra?2:1);
+      batch.workers=laneCounts.reduce((sum,count)=>sum+count,0);batch.activeAccountId=pool[0].id;
       let cursor=0;
-      async function accountLoop(account,index){
+      async function accountLoop(account,index,lanes){
         while(!batch.cancelRequested){
-          const job=pending[cursor++];if(!job)break;
-          if(job.status!=='Trong hàng đợi')continue;
-          if(job.outputPath&&fs.existsSync(job.outputPath)&&job.teamOutputBase){job.outputPath=await cropToAspect(job.outputPath,job.type,parseAspectRatio(job.aspectRatio));finalizeTeamOutput(job);job.status='Hoàn tất';job.error=null;job.finishedAt=new Date().toISOString();persistHistory();continue}
-          job.status='Đang tạo trên Muse';job.accountId=account.id;job.startedAt=new Date().toISOString();job.worker=index+1;job.promptSent=true;job.error=null;job.errorCode=null;activeAccountJobs.set(account.id,job.id);persistHistory();
+          if(!accountAvailable(account))break;
+          const tasks=[];
+          for(let lane=0;lane<lanes;lane++){
+            const job=pending[cursor++];if(!job)break;
+            if(job.status!=='Trong hàng đợi')continue;
+            if(job.outputPath&&fs.existsSync(job.outputPath)&&job.teamOutputBase){job.outputPath=await cropToAspect(job.outputPath,job.type,parseAspectRatio(job.aspectRatio));finalizeTeamOutput(job);job.status='Hoàn tất';job.error=null;job.finishedAt=new Date().toISOString();persistHistory();continue}
+            job.status='Đang tạo trên Muse';job.accountId=account.id;job.startedAt=new Date().toISOString();job.worker=laneCounts.slice(0,index).reduce((sum,count)=>sum+count,0)+lane+1;job.lane=lane;job.promptSent=true;job.error=null;job.errorCode=null;tasks.push({job,lane});
+          }
+          if(!tasks.length){if(cursor>=pending.length)break;continue}
+          activeAccountJobs.set(account.id,tasks.map(({job})=>job.id));persistHistory();
           try{
-            const result=await runMuseTaskProcess(account,job);
-            await storeWorkerResult(job,result.tempPath);applyWorkerQuota(account,result.quota);
-            job.status='Hoàn tất';job.error=null;job.errorCode=null;job.finishedAt=new Date().toISOString();
-          }catch(error){
-            if(error.code==='MUSE_QUOTA'){account.quotaBlockedAt=new Date().toISOString();account.quotaReason=error.message;persistAccounts()}
-            const retryable=['MUSE_GENERATION_FAILED','MUSE_QUOTA','MUSE_LOGIN_REQUIRED','MUSE_WORKER_TIMEOUT','MUSE_WORKER_EXIT'].includes(error.code);
-            if(retryable&&!batch.cancelRequested&&(job.retryCount||0)<(batch.maxRetries||0)){
-              job.retryCount=(job.retryCount||0)+1;job.status='Trong hàng đợi';job.error=null;job.errorCode=null;job.startedAt=null;job.accountId=null;job.promptSent=false;pending.push(job);
-            }else{job.status='Lỗi';job.error=error.message;job.errorCode=error.code||'KSTUDIO_ERROR'}
+            const results=tasks.length===2?await runMuseTasksProcess(account,tasks):[{jobId:tasks[0].job.id,lane:tasks[0].lane,ok:true,...await runMuseTaskProcess(account,{...tasks[0].job,lane:tasks[0].lane})}];
+            for(const {job,lane} of tasks){
+              const result=results.find(item=>item.jobId===job.id);
+              if(result?.chatUrl&&/^https:\/\/muse\.ai\/thread\/[0-9a-f-]{36}$/i.test(result.chatUrl)){account.sideChatUrls=Array.isArray(account.sideChatUrls)?account.sideChatUrls.slice(0,2):[];account.sideChatUrls[lane]=result.chatUrl;persistAccounts()}
+              if(!result?.ok){
+                const error=Object.assign(new Error(result?.error||'Muse không trả kết quả.'),{code:result?.code||'KSTUDIO_ERROR'});
+                if(error.code==='MUSE_QUOTA'){account.quotaBlockedAt=new Date().toISOString();account.quotaReason=error.message;persistAccounts()}
+                const retryable=['MUSE_GENERATION_FAILED','MUSE_QUOTA','MUSE_LOGIN_REQUIRED','MUSE_WORKER_TIMEOUT','MUSE_WORKER_EXIT'].includes(error.code);
+                if(retryable&&!batch.cancelRequested&&(job.retryCount||0)<(batch.maxRetries||0)){job.retryCount=(job.retryCount||0)+1;job.status='Trong hàng đợi';job.error=null;job.errorCode=null;job.startedAt=null;job.accountId=null;job.promptSent=false;pending.push(job)}
+                else{job.status='Lỗi';job.error=error.message;job.errorCode=error.code}
+                continue;
+              }
+              try{await storeWorkerResult(job,result.tempPath);applyWorkerQuota(account,result.quota);job.status='Hoàn tất';job.error=null;job.errorCode=null;job.finishedAt=new Date().toISOString()}
+              catch(error){job.status='Lỗi';job.error=error.message;job.errorCode=error.code||'KSTUDIO_ERROR'}
+            }
           }finally{activeAccountJobs.delete(account.id);persistHistory()}
         }
       }
-      await Promise.all(pool.map(accountLoop));
+      await Promise.all(pool.map((account,index)=>accountLoop(account,index,laneCounts[index])));
     }
     if(batch.cancelRequested){for(const job of batch.jobs)if(job.status==='Trong hàng đợi')job.status='Đã hủy';batch.status='Đã hủy'}
     else if(batch.jobs.some(job=>job.status==='Trong hàng đợi')){batch.status='Tạm dừng: cần đăng nhập';batch.error='Một số tài khoản chưa đăng nhập hoặc không còn khả dụng.'}
@@ -515,13 +569,13 @@ const server=http.createServer(async(req,res)=>{
     try{return url.pathname.endsWith('/reveal')?respond(res,200,{apiKey:localApiControl.reveal()}):respond(res,200,localApiControl.rotate())}
     catch(e){return respond(res,500,{error:e.message})}
   }
-  if(req.method==='GET' && url.pathname==='/api/settings') return respond(res,200,settings);
+  if(req.method==='GET' && url.pathname==='/api/settings') {if(settings.workerCountMode==='auto'){settings.imageWorkers=workerCapacityForType('Ảnh');settings.videoWorkers=workerCapacityForType('Video')}return respond(res,200,settings)}
   if(req.method==='GET' && url.pathname==='/api/accounts') return respond(res,200,{activeId:museAccountId,state:museState,accounts:accounts.map(a=>({id:a.id,name:a.name,enabled:a.enabled,primary:a.primary,open:activeAccountJobs.has(a.id)||!!(museContext&&museAccountId===a.id),session:activeAccountJobs.has(a.id)?'Đang chạy':museAccountId===a.id?museState:'Chưa mở',quotaBlocked:!accountAvailable(a)&&a.enabled,quotaBlockedAt:a.quotaBlockedAt||null,quotaReason:a.quotaReason||null,quotaRetryAt:a.quotaBlockedAt?new Date(Date.parse(a.quotaBlockedAt)+QUOTA_RECHECK_MS).toISOString():null,...quotaSnapshot(a),jobs:Array.from(batches.values()).reduce((n,b)=>n+b.jobs.filter(j=>(j.accountId||b.accountId)===a.id).length,0)}))});
   if(req.method==='POST' && url.pathname==='/api/accounts') {
-    try { const data=await bodyJson(req),name=String(data.name||'').trim();if(!name)return respond(res,400,{error:'Nhập tên tài khoản.'});const account={id:crypto.randomUUID().replace(/-/g,''),name,enabled:true,primary:false,profileDir:path.join(ROOT,'.muse-profiles'),createdAt:new Date().toISOString()};accounts.push(account);persistAccounts();return respond(res,201,{id:account.id,name:account.name,enabled:account.enabled,primary:account.primary,open:false,session:'Chưa đăng nhập'}); } catch(e){return respond(res,400,{error:e.message});}
+    try { const data=await bodyJson(req),name=String(data.name||'').trim();if(!name)return respond(res,400,{error:'Nhập tên tài khoản.'});const account={id:crypto.randomUUID().replace(/-/g,''),name,enabled:true,primary:false,profileDir:path.join(ROOT,'.muse-profiles'),createdAt:new Date().toISOString(),sideChatUrls:[]};accounts.push(account);syncAutomaticWorkerCapacity();persistAccounts();return respond(res,201,{id:account.id,name:account.name,enabled:account.enabled,primary:account.primary,open:false,session:'Chưa đăng nhập'}); } catch(e){return respond(res,400,{error:e.message});}
   }
   if(req.method==='POST' && url.pathname.startsWith('/api/accounts/') && url.pathname.endsWith('/open')) {
-    const id=url.pathname.split('/')[3];if(runningBatches.size&&id!==museAccountId)return respond(res,409,{error:'Tài khoản hiện tại còn tác vụ đang chạy. Đợi xong rồi chuyển phiên.'});try{const result=await connectMuse(id);if(result.state==='ready')resumePausedBatches();return respond(res,200,result);}catch(e){museState='error';return respond(res,500,{state:museState,error:e.message});}
+    const id=url.pathname.split('/')[3];if(runningBatches.size&&id!==museAccountId)return respond(res,409,{error:'Tài khoản hiện tại còn tác vụ đang chạy. Đợi xong rồi chuyển phiên.'});try{const result=await connectMuse(id);if(result.state==='ready'){syncAutomaticWorkerCapacity();resumePausedBatches()}return respond(res,200,result);}catch(e){museState='error';return respond(res,500,{state:museState,error:e.message});}
   }
   if(req.method==='POST' && url.pathname.startsWith('/api/accounts/') && url.pathname.endsWith('/retry-quota')) {
     const id=url.pathname.split('/')[3],account=accounts.find(a=>a.id===id);if(!account)return respond(res,404,{error:'Không tìm thấy tài khoản.'});
@@ -529,17 +583,17 @@ const server=http.createServer(async(req,res)=>{
   }
   if(req.method==='PUT' && url.pathname.startsWith('/api/accounts/')) {
     const id=url.pathname.split('/')[3],account=accounts.find(a=>a.id===id);if(!account)return respond(res,404,{error:'Không tìm thấy tài khoản.'});
-      try{const data=await bodyJson(req);if(data.name!==undefined){const name=String(data.name).trim();if(!name)return respond(res,400,{error:'Tên tài khoản không được để trống.'});account.name=name}if(data.enabled!==undefined){if(!data.enabled&&runningBatches.size&&museAccountId===id)return respond(res,409,{error:'Tài khoản còn tác vụ đang chạy.'});account.enabled=Boolean(data.enabled);if(!account.enabled&&accounts.filter(a=>a.enabled).length===0)return respond(res,400,{error:'Cần giữ ít nhất một tài khoản đang bật.'});if(!account.enabled&&account.primary){account.primary=false;const next=accounts.find(a=>a.enabled);if(next)next.primary=true}if(!account.enabled&&museAccountId===id&&museContext){await museContext.close().catch(()=>{});museContext=null;musePage=null;museState='disconnected'}}if(data.primary){if(!account.enabled)return respond(res,400,{error:'Hãy bật tài khoản trước.'});for(const a of accounts)a.primary=false;account.primary=true;const index=accounts.indexOf(account);if(index>0){accounts.splice(index,1);accounts.unshift(account)}}if(data.move){const from=accounts.indexOf(account),to=Math.max(0,Math.min(accounts.length-1,from+Number(data.move)));accounts.splice(from,1);accounts.splice(to,0,account)}persistAccounts();if(data.enabled)resumePausedBatches();return respond(res,200,{id:account.id,name:account.name,enabled:account.enabled,primary:account.primary,open:museAccountId===id&&!!museContext,session:museAccountId===id?museState:'Chưa mở'});}catch(e){return respond(res,400,{error:e.message});}
+      try{const data=await bodyJson(req);if(data.name!==undefined){const name=String(data.name).trim();if(!name)return respond(res,400,{error:'Tên tài khoản không được để trống.'});account.name=name}if(data.enabled!==undefined){if(!data.enabled&&runningBatches.size&&museAccountId===id)return respond(res,409,{error:'Tài khoản còn tác vụ đang chạy.'});account.enabled=Boolean(data.enabled);if(!account.enabled&&accounts.filter(a=>a.enabled).length===0)return respond(res,400,{error:'Cần giữ ít nhất một tài khoản đang bật.'});if(!account.enabled&&account.primary){account.primary=false;const next=accounts.find(a=>a.enabled);if(next)next.primary=true}if(!account.enabled&&museAccountId===id&&museContext){await museContext.close().catch(()=>{});museContext=null;musePage=null;museState='disconnected'}}if(data.primary){if(!account.enabled)return respond(res,400,{error:'Hãy bật tài khoản trước.'});for(const a of accounts)a.primary=false;account.primary=true;const index=accounts.indexOf(account);if(index>0){accounts.splice(index,1);accounts.unshift(account)}}if(data.move){const from=accounts.indexOf(account),to=Math.max(0,Math.min(accounts.length-1,from+Number(data.move)));accounts.splice(from,1);accounts.splice(to,0,account)}syncAutomaticWorkerCapacity();persistAccounts();if(data.enabled)resumePausedBatches();return respond(res,200,{id:account.id,name:account.name,enabled:account.enabled,primary:account.primary,open:museAccountId===id&&!!museContext,session:museAccountId===id?museState:'Chưa mở'});}catch(e){return respond(res,400,{error:e.message});}
   }
   if(req.method==='DELETE' && url.pathname.startsWith('/api/accounts/')) {
-    const id=url.pathname.split('/')[3];if(Array.from(batches.values()).some(b=>b.accountId===id&&!['Hoàn tất','Hoàn tất, có lỗi','Lỗi kết nối Muse','Chờ đăng nhập Muse','Lỗi'].includes(b.status)))return respond(res,409,{error:'Tài khoản còn tác vụ đang chạy.'});if(accounts.length<=1)return respond(res,400,{error:'Phải giữ lại ít nhất một tài khoản.'});const index=accounts.findIndex(a=>a.id===id);if(index<0)return respond(res,404,{error:'Không tìm thấy tài khoản.'});if(museAccountId===id&&museContext){await museContext.close().catch(()=>{});museContext=null;musePage=null;museState='disconnected';}accounts.splice(index,1);if(!accounts.some(a=>a.primary))accounts[0].primary=true;if(settings.imageAccountId===id){settings.imageAccountId='';persistSettings()}persistAccounts();return respond(res,200,{ok:true});
+    const id=url.pathname.split('/')[3];if(Array.from(batches.values()).some(b=>b.accountId===id&&!['Hoàn tất','Hoàn tất, có lỗi','Lỗi kết nối Muse','Chờ đăng nhập Muse','Lỗi'].includes(b.status)))return respond(res,409,{error:'Tài khoản còn tác vụ đang chạy.'});if(accounts.length<=1)return respond(res,400,{error:'Phải giữ lại ít nhất một tài khoản.'});const index=accounts.findIndex(a=>a.id===id);if(index<0)return respond(res,404,{error:'Không tìm thấy tài khoản.'});if(museAccountId===id&&museContext){await museContext.close().catch(()=>{});museContext=null;musePage=null;museState='disconnected';}accounts.splice(index,1);if(!accounts.some(a=>a.primary))accounts[0].primary=true;if(settings.imageAccountId===id){settings.imageAccountId='';persistSettings()}syncAutomaticWorkerCapacity();persistAccounts();return respond(res,200,{ok:true});
   }
   if(req.method==='PUT' && url.pathname==='/api/settings') {
     try {
       const data=await bodyJson(req);
       if(data.outputDir!==undefined) { const p=path.resolve(String(data.outputDir)); if(!path.isAbsolute(p)) return respond(res,400,{error:'Thư mục lưu không hợp lệ.'}); settings.outputDir=p; }
-      if(data.imageWorkers!==undefined)settings.imageWorkers=Math.max(1,Math.min(MAX_WORKERS,Number(data.imageWorkers)||DEFAULT_SETTINGS.imageWorkers));
-      if(data.videoWorkers!==undefined)settings.videoWorkers=Math.max(1,Math.min(MAX_WORKERS,Number(data.videoWorkers)||DEFAULT_SETTINGS.videoWorkers));
+      if(data.imageWorkers!==undefined){const next=Math.max(1,Math.min(maximumWorkersForAccounts(accountsForType('Ảnh')),Number(data.imageWorkers)||1));if(next!==Number(settings.imageWorkers))settings.workerCountMode='manual';settings.imageWorkers=next}
+      if(data.videoWorkers!==undefined){const next=Math.max(1,Math.min(maximumWorkersForAccounts(accountsForType('Video')),Number(data.videoWorkers)||1));if(next!==Number(settings.videoWorkers))settings.workerCountMode='manual';settings.videoWorkers=next}
       for(const key of ['imageTimeout','videoTimeout']) if(data[key]!==undefined) settings[key]=Math.max(1,Math.min(240,Number(data[key])||DEFAULT_SETTINGS[key]));
       for(const key of ['allowedDomainsEnabled','allowedDomains','promptSeparator','autoReservePercent']) if(data[key]!==undefined) settings[key]=key==='autoReservePercent'?Math.max(0,Math.min(100,Number(data[key])||0)):data[key];
       if(data.imageAccountId!==undefined){const id=String(data.imageAccountId||'');if(id&&!accounts.some(a=>a.id===id))return respond(res,400,{error:'Không tìm thấy tài khoản dành cho ảnh.'});settings.imageAccountId=id;}
@@ -616,7 +670,7 @@ const server=http.createServer(async(req,res)=>{
     } catch(e) { return respond(res,500,{error:e.message}); }
   }
   if(req.method==='POST' && url.pathname==='/api/muse/connect') {
-    try { const data=await bodyJson(req),id=data.accountId||'default';if(runningBatches.size&&id!==museAccountId)return respond(res,409,{error:'Tài khoản hiện tại còn tác vụ đang chạy. Đợi xong rồi chuyển phiên.'});const result=await connectMuse(id,Boolean(data.hidden));if(result.state==='ready')resumePausedBatches();return respond(res,200,result); }
+    try { const data=await bodyJson(req),id=data.accountId||'default';if(runningBatches.size&&id!==museAccountId)return respond(res,409,{error:'Tài khoản hiện tại còn tác vụ đang chạy. Đợi xong rồi chuyển phiên.'});const result=await connectMuse(id,Boolean(data.hidden));if(result.state==='ready'){syncAutomaticWorkerCapacity();resumePausedBatches()}return respond(res,200,result); }
     catch(e) { museState='error'; return respond(res,500,{state:museState,error:e.message}); }
   }
   if(req.method==='POST' && url.pathname==='/api/batches') {
@@ -635,7 +689,7 @@ const server=http.createServer(async(req,res)=>{
         const decoded=Buffer.from(match[2],'base64');if(decoded.length>6*1024*1024)return respond(res,400,{error:'Mỗi ảnh tham chiếu tối đa 6 MB.'});if(decoded.toString('base64')!==match[2])return respond(res,400,{error:'Dữ liệu ảnh tham chiếu không hợp lệ.'});
       }
       const inferredType=types.find(type=>type==='Ảnh'||type==='Video')||'Ảnh';
-      const workers=Math.max(1,Math.min(MAX_WORKERS,Number(data.workers)|| (inferredType==='Video'?settings.videoWorkers:settings.imageWorkers)));
+      const workers=Math.max(1,Math.min(maximumWorkersForAccounts(accountsForType(inferredType)),Number(data.workers)||(settings.workerCountMode==='auto'?workerCapacityForType(inferredType):(inferredType==='Video'?settings.videoWorkers:settings.imageWorkers))));
       const accountId=accounts.some(a=>a.id===data.accountId&&a.enabled)?data.accountId:(accounts.find(a=>a.primary&&a.enabled)||accounts.find(a=>a.enabled))?.id;
       if(!accountId)return respond(res,400,{error:'Không có tài khoản Muse đang bật.'});
       const batch={id:crypto.randomUUID(),status:'Đang chờ',workers,accountId,strictAccount:Boolean(data.strictAccount),createdAt:new Date().toISOString(),jobs:valid.map(item=>{const id=crypto.randomUUID(),type=detect(item.prompt),job={id,prompt:item.prompt,type,status:'Trong hàng đợi'};if(item.referenceImage){const ext={'image/png':'.png','image/jpeg':'.jpg','image/webp':'.webp'}[item.referenceImage.mimeType];fs.mkdirSync(REFERENCE_DIR,{recursive:true});job.referenceImagePath=path.join(REFERENCE_DIR,id+ext);job.referenceName=path.basename(String(item.referenceImage.name||'anh-tham-chieu'+ext)).slice(0,180);fs.writeFileSync(job.referenceImagePath,Buffer.from(String(item.referenceImage.data).split(',')[1],'base64'))}return job})};
@@ -683,7 +737,7 @@ server.listen(PORT,'127.0.0.1',()=>{
   }
   persistHistory();
 });
-localApiControl=startLocalApi({dataRoot:DATA_ROOT,outputRootDir,referenceDir:REFERENCE_DIR,batches,accounts,queueBatch,persistHistory,runningBatches,accountReady:account=>activeAccountJobs.has(account.id)||(museState==='ready'&&museAccountId===account.id&&museContextIsAlive())||fs.existsSync(path.join(account.profileDir,'Default','Network','Cookies'))||fs.existsSync(path.join(account.profileDir,'Default','Cookies')),defaultQuotaThreshold:()=>null,defaultWorkerCount:type=>type==='Video'?settings.videoWorkers:settings.imageWorkers});
+localApiControl=startLocalApi({dataRoot:DATA_ROOT,outputRootDir,referenceDir:REFERENCE_DIR,batches,accounts,queueBatch,persistHistory,runningBatches,accountReady:account=>activeAccountJobs.has(account.id)||(museState==='ready'&&museAccountId===account.id&&museContextIsAlive())||accountHasSavedSession(account),defaultQuotaThreshold:()=>null,defaultWorkerCount:type=>settings.workerCountMode==='auto'?workerCapacityForType(type):(type==='Video'?settings.videoWorkers:settings.imageWorkers)});
 setTimeout(()=>{
   if(scheduledBatches.size||runningBatches.size)return;
   const account=accounts.find(a=>a.primary&&a.enabled)||accounts.find(a=>a.enabled);
