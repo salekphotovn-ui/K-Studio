@@ -4,7 +4,7 @@
 
 ## Cài bản EXE trên Windows
 
-Chạy `scripts/build-windows-exe.ps1` trên máy phát triển để tạo `release\K-Studio-Setup-v<version>.exe`. Máy nhận chạy trình cài đặt; K Studio cài Node.js và Playwright riêng cùng ứng dụng, rồi tạo lối tắt. Bộ cài tự dò Chrome và bỏ qua nếu đã có. Nếu thiếu, bộ cài hỏi trước khi tải Chrome từ Google, xác minh chữ ký nhà phát hành rồi cài; nếu tự cài không thành công, nó mở trang Chrome chính thức để cài thủ công. Máy nhận cần Internet để đăng nhập Muse. Không gửi thư mục `.git`, `accounts.json`, profile trình duyệt, API key hay lịch sử cá nhân.
+Chạy `scripts/build-windows-exe.ps1` trên máy phát triển để tạo `release\K-Studio-Setup-v<version>.exe`. Máy nhận chạy trình cài đặt; K Studio cài Node.js và Playwright riêng cùng ứng dụng, rồi tạo lối tắt desktop và Start Menu trỏ tới launcher có icon K Studio. Launcher chạy PowerShell ẩn, kiểm tra bản cập nhật và hiển thị tiến trình tải/cài đặt. Bộ cài tự dò Chrome và bỏ qua nếu đã có. Nếu thiếu, bộ cài hỏi trước khi tải Chrome từ Google, xác minh chữ ký nhà phát hành rồi cài; nếu tự cài không thành công, nó mở trang Chrome chính thức để cài thủ công. Máy nhận cần Internet để đăng nhập Muse. Không gửi thư mục `.git`, `accounts.json`, profile trình duyệt, API key hay lịch sử cá nhân.
 
 Gỡ K Studio bằng lối tắt **Gỡ cài đặt K Studio** trong Start Menu. Thao tác gỡ chỉ xóa chương trình, giữ dữ liệu và các phiên Muse ở `%LOCALAPPDATA%\K Studio`.
 

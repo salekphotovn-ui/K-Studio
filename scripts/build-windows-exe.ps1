@@ -15,6 +15,12 @@ if (-not $releaseFull.StartsWith($projectFull, [StringComparison]::OrdinalIgnore
 if (Test-Path -LiteralPath $stage) { Remove-Item -LiteralPath $stage -Recurse -Force }
 New-Item -ItemType Directory -Path $appStage -Force | Out-Null
 
+$icon = Join-Path $project 'assets\KStudio.ico'
+$launcher = Join-Path $appStage 'KStudioLauncher.exe'
+$launcherArgs = @('/nologo', '/target:winexe', '/platform:x64', "/out:$launcher", "/win32icon:$icon", '/reference:System.Windows.Forms.dll', '/reference:System.Drawing.dll', (Join-Path $PSScriptRoot 'KStudioLauncher.cs'))
+& $compiler @launcherArgs
+if ($LASTEXITCODE -ne 0 -or -not (Test-Path -LiteralPath $launcher)) { throw 'Khong bien dich duoc K Studio Launcher.' }
+
 $files = @(
   'server.js', 'platform.js', 'local-api.js', 'media-transform.js', 'muse-quota.js',
   'muse-task-worker.js', 'muse-multi-worker.js', 'muse-window.ps1', 'dashboard.html', 'package.json',
@@ -31,7 +37,7 @@ $zip = Join-Path $stage 'KStudioPayload.zip'
 Compress-Archive -Path (Join-Path $appStage '*') -DestinationPath $zip -CompressionLevel Optimal
 $target = Join-Path $release ('K-Studio-Setup-v' + $package.version + '.exe')
 $compilerArgs = @(
-  '/nologo', '/target:winexe', '/platform:x64', "/out:$target",
+  '/nologo', '/target:winexe', '/platform:x64', "/out:$target", "/win32icon:$icon",
   "/resource:$zip,KStudioPayload.zip", '/reference:System.Windows.Forms.dll',
   '/reference:System.IO.Compression.dll', '/reference:System.IO.Compression.FileSystem.dll',
   (Join-Path $PSScriptRoot 'KStudioSetup.cs')

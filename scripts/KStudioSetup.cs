@@ -13,15 +13,26 @@ using System.Windows.Forms;
 internal static class KStudioSetup
 {
     private static string LocalDataRoot { get { return Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData), "K Studio"); } }
+    private static string LauncherRoot { get { return Path.Combine(LocalDataRoot, "Launcher"); } }
+    private static string LauncherPath
+    {
+        get
+        {
+            var packagePath = Path.Combine(InstallRoot, "package.json");
+            var version = File.Exists(packagePath) ? (System.Text.RegularExpressions.Regex.Match(File.ReadAllText(packagePath), "\\\"version\\\"\\s*:\\s*\\\"([^\\\"]+)\\\"").Groups[1].Value) : "current";
+            return Path.Combine(LauncherRoot, "KStudioLauncher-v" + version + ".exe");
+        }
+    }
     private static string InstallRoot { get { return Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData), "Programs", "K Studio"); } }
     private static string StartMenuRoot { get { return Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.ApplicationData), "Microsoft", "Windows", "Start Menu", "Programs", "K Studio"); } }
 
     [STAThread]
-    private static void Main()
+    private static void Main(string[] args)
     {
         Application.EnableVisualStyles();
         try
         {
+            bool updateMode = args != null && Array.Exists(args, value => String.Equals(value, "--update", StringComparison.OrdinalIgnoreCase));
             using (var client = new TcpClient())
             {
                 var pending = client.BeginConnect("127.0.0.1", 4173, null, null);
@@ -34,10 +45,13 @@ internal static class KStudioSetup
             }
 
             var chromePath = FindChrome();
-            if (String.IsNullOrEmpty(chromePath) && !InstallChrome()) { Environment.ExitCode = 3; return; }
+            if (!updateMode && String.IsNullOrEmpty(chromePath) && !InstallChrome()) { Environment.ExitCode = 3; return; }
 
-            var answer = MessageBox.Show("Cài K Studio vào thư mục người dùng hiện tại? Tài khoản Muse và dữ liệu sẽ được lưu riêng, không nằm trong bộ cài.", "K Studio Setup", MessageBoxButtons.YesNo, MessageBoxIcon.Question);
-            if (answer != DialogResult.Yes) { Environment.ExitCode = 4; return; }
+            if (!updateMode)
+            {
+                var answer = MessageBox.Show("Cài K Studio vào thư mục người dùng hiện tại? Tài khoản Muse và dữ liệu sẽ được lưu riêng, không nằm trong bộ cài.", "K Studio Setup", MessageBoxButtons.YesNo, MessageBoxIcon.Question);
+                if (answer != DialogResult.Yes) { Environment.ExitCode = 4; return; }
+            }
 
             var tempRoot = Path.Combine(Path.GetTempPath(), "KStudioSetup-" + Guid.NewGuid().ToString("N"));
             Directory.CreateDirectory(tempRoot);
@@ -60,6 +74,12 @@ internal static class KStudioSetup
                     }
                 }
                 CopyDirectory(tempRoot, InstallRoot);
+                var stagedLauncher = Path.Combine(tempRoot, "KStudioLauncher.exe");
+                if (!File.Exists(LauncherPath))
+                {
+                    Directory.CreateDirectory(LauncherRoot);
+                    if (File.Exists(stagedLauncher)) File.Copy(stagedLauncher, LauncherPath, true);
+                }
                 try { CreateShortcuts(); }
                 catch (Exception shortcutError)
                 {
@@ -71,10 +91,11 @@ internal static class KStudioSetup
 
             var installedMessage = "Đã cài K Studio. Máy này cần Google Chrome để đăng nhập Muse.";
             if (!String.IsNullOrEmpty(shortcutWarning)) installedMessage += "\r\n\r\nKhông tạo được lối tắt tự động: " + shortcutWarning + "\r\nAnh vẫn có thể mở K Studio tại:\r\n" + Path.Combine(InstallRoot, "Mở K Studio.bat");
+            if (updateMode) return;
             installedMessage += "\r\n\r\nMở K Studio ngay?";
             var launch = MessageBox.Show(installedMessage, "K Studio Setup", MessageBoxButtons.YesNo, shortcutWarning == null ? MessageBoxIcon.Information : MessageBoxIcon.Warning);
             if (launch == DialogResult.Yes)
-                Process.Start(new ProcessStartInfo { FileName = Path.Combine(InstallRoot, "Mở K Studio.bat"), WorkingDirectory = InstallRoot, UseShellExecute = true });
+                Process.Start(new ProcessStartInfo { FileName = LauncherPath, WorkingDirectory = LauncherRoot, UseShellExecute = true });
         }
         catch (Exception error)
         {
@@ -154,8 +175,8 @@ if ($signature.Status -ne 'Valid' -or $signer -ne 'Google LLC') { exit 1 }
         Directory.CreateDirectory(LocalDataRoot);
         var uninstallPath = Path.Combine(LocalDataRoot, "uninstall-kstudio.ps1");
         File.WriteAllText(uninstallPath, UninstallerScript);
-        CreateShortcut(Path.Combine(StartMenuRoot, "K Studio.lnk"), Path.Combine(InstallRoot, "Mở K Studio.bat"), InstallRoot, "Mở K Studio");
-        CreateShortcut(Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.DesktopDirectory), "K Studio.lnk"), Path.Combine(InstallRoot, "Mở K Studio.bat"), InstallRoot, "Mở K Studio");
+        CreateShortcut(Path.Combine(StartMenuRoot, "K Studio.lnk"), LauncherPath, LauncherRoot, "Mở K Studio", iconPath: LauncherPath);
+        CreateShortcut(Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.DesktopDirectory), "K Studio.lnk"), LauncherPath, LauncherRoot, "Mở K Studio", iconPath: LauncherPath);
         CreateShortcut(Path.Combine(StartMenuRoot, "Cập nhật K Studio.lnk"), Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.System), "WindowsPowerShell\\v1.0\\powershell.exe"), InstallRoot, "Kiểm tra và cài bản K Studio mới", "-NoProfile -NoExit -ExecutionPolicy Bypass -File \"" + Path.Combine(InstallRoot, "Update-K-Studio-Installed.ps1") + "\"");
         CreateShortcut(Path.Combine(StartMenuRoot, "Gỡ cài đặt K Studio.lnk"), Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.System), "WindowsPowerShell\\v1.0\\powershell.exe"), LocalDataRoot, "Gỡ K Studio, giữ dữ liệu Muse", "-NoProfile -ExecutionPolicy Bypass -File \"" + uninstallPath + "\"");
     }
@@ -167,7 +188,7 @@ if ($signature.Status -ne 'Valid' -or $signer -ne 'Google LLC') { exit 1 }
         foreach (var directory in Directory.GetDirectories(source)) CopyDirectory(directory, Path.Combine(destination, Path.GetFileName(directory)));
     }
 
-    private static void CreateShortcut(string shortcutPath, string targetPath, string workingDirectory, string description, string arguments = "")
+    private static void CreateShortcut(string shortcutPath, string targetPath, string workingDirectory, string description, string arguments = "", string iconPath = null)
     {
         IShellLinkW link = null;
         try
@@ -177,6 +198,7 @@ if ($signature.Status -ne 'Valid' -or $signer -ne 'Google LLC') { exit 1 }
             link.SetWorkingDirectory(workingDirectory);
             link.SetDescription(description);
             if (!String.IsNullOrEmpty(arguments)) link.SetArguments(arguments);
+            if (!String.IsNullOrEmpty(iconPath)) link.SetIconLocation(iconPath, 0);
             link.SetShowCmd(1);
             ((IPersistFile)link).Save(shortcutPath, true);
         }

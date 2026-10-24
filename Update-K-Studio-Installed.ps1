@@ -1,9 +1,15 @@
-﻿param([switch]$StartupCheck)
+﻿param([switch]$StartupCheck, [string]$ProgressFile)
 
 $ErrorActionPreference = 'Stop'
 $installRoot = Split-Path -Parent $MyInvocation.MyCommand.Path
 $installed = Get-Content -LiteralPath (Join-Path $installRoot 'package.json') -Raw | ConvertFrom-Json
 $currentVersion = [version]$installed.version
+function Set-LauncherProgress([string]$Phase, [string]$Message, [string]$DownloadPath = '', [long]$TotalBytes = 0) {
+  if (-not $ProgressFile) { return }
+  $safeMessage = ($Message -replace '[\r\n\t]', ' ')
+  $lines = @($Phase, $safeMessage, $DownloadPath, [string]$TotalBytes)
+  [IO.File]::WriteAllText($ProgressFile, ($lines -join [Environment]::NewLine), [Text.Encoding]::UTF8)
+}
 $repository = if ($env:KSTUDIO_UPDATE_REPO) { $env:KSTUDIO_UPDATE_REPO } else { 'salekphotovn-ui/K-Studio' }
 if ($repository -notmatch '^[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+$') { throw 'Tên kho cập nhật không hợp lệ.' }
 
@@ -26,6 +32,7 @@ function Assert-NoPendingJobs {
 }
 
 Write-Host "K Studio hiện tại: v$currentVersion" -ForegroundColor Cyan
+Set-LauncherProgress 'checking' 'Đang kiểm tra phiên bản mới…'
 $apiUrl = "https://api.github.com/repos/$repository/releases/latest"
 $useGh = $false
 $gh = Get-Command gh.exe -ErrorAction SilentlyContinue
@@ -47,7 +54,7 @@ if (-not $useGh) {
 }
 if ($release.draft -or $release.prerelease -or $release.tag_name -notmatch '^v?(\d+\.\d+\.\d+)$') { throw 'Thông tin phiên bản trên GitHub không hợp lệ.' }
 $latestVersion = [version]$Matches[1]
-if ($latestVersion -le $currentVersion) { Write-Host 'Máy này đã có phiên bản mới nhất.' -ForegroundColor Green; return }
+if ($latestVersion -le $currentVersion) { Set-LauncherProgress 'ready' 'Đang mở K Studio…'; Write-Host 'Máy này đã có phiên bản mới nhất.' -ForegroundColor Green; return }
 
 $assetName = "K-Studio-Setup-v$latestVersion.exe"
 $asset = @($release.assets | Where-Object { $_.name -ceq $assetName }) | Select-Object -First 1
@@ -57,11 +64,12 @@ $expectedPrefix = "https://github.com/$repository/releases/download/"
 if (-not $asset.browser_download_url.StartsWith($expectedPrefix, [StringComparison]::OrdinalIgnoreCase)) { throw 'Địa chỉ tải bộ cài không hợp lệ.' }
 
 Write-Host "Có bản mới: v$latestVersion" -ForegroundColor Green
+Set-LauncherProgress 'available' ("Đã có bản v{0}. Chọn cập nhật để tiếp tục." -f $latestVersion)
 Assert-NoPendingJobs | Out-Null
 if ($StartupCheck) {
   Add-Type -AssemblyName System.Windows.Forms
   $answer = [System.Windows.Forms.MessageBox]::Show("Có K Studio v$latestVersion. Anh muốn tải và cài ngay không?", 'Có bản cập nhật K Studio', [System.Windows.Forms.MessageBoxButtons]::YesNo, [System.Windows.Forms.MessageBoxIcon]::Information)
-  if ($answer -ne [System.Windows.Forms.DialogResult]::Yes) { Write-Host 'Đã hoãn cập nhật.'; return }
+  if ($answer -ne [System.Windows.Forms.DialogResult]::Yes) { Set-LauncherProgress 'ready' 'Đã bỏ qua cập nhật; đang mở K Studio…'; Write-Host 'Đã hoãn cập nhật.'; return }
 } else {
   $answer = Read-Host 'Tải và cài bản mới? Nhập C để tiếp tục'
   if ($answer -notin @('C', 'c')) { Write-Host 'Đã hủy cập nhật.'; return }
@@ -72,12 +80,14 @@ New-Item -ItemType Directory -Path $downloadDir -Force | Out-Null
 $installer = Join-Path $downloadDir $assetName
 try {
   Write-Host 'Đang tải bộ cài từ GitHub...'
+  Set-LauncherProgress 'downloading' ("Đang tải K Studio v{0}…" -f $latestVersion) $installer ([long]$asset.size)
   if ($useGh) {
     & $gh.Source release download $release.tag_name --repo $repository --pattern $assetName --dir $downloadDir --clobber
     if ($LASTEXITCODE -ne 0) { throw 'GitHub CLI không tải được bộ cài.' }
   } else {
     Invoke-WebRequest -Uri $asset.browser_download_url -OutFile $installer -UseBasicParsing -TimeoutSec 300
   }
+  Set-LauncherProgress 'verifying' 'Đang xác minh SHA-256…' $installer ([long]$asset.size)
   $actualHash = (Get-FileHash -LiteralPath $installer -Algorithm SHA256).Hash.ToUpperInvariant()
   if ($actualHash -ne $expectedHash) { throw 'Mã SHA-256 không khớp. Bộ cài đã tải sẽ không được chạy.' }
   Write-Host 'Đã kiểm tra SHA-256.' -ForegroundColor Green
@@ -93,12 +103,14 @@ try {
     if (Get-NetTCPConnection -LocalPort 4173 -State Listen -ErrorAction SilentlyContinue) { throw 'Không đóng được K Studio. Hãy thử lại sau.' }
   }
 
-  Write-Host 'Đang mở bộ cài. Xác nhận trong cửa sổ K Studio Setup.' -ForegroundColor Cyan
-  $process = Start-Process -FilePath $installer -Wait -PassThru
+  Set-LauncherProgress 'installing' 'Đang cài đặt bản mới…' $installer ([long]$asset.size)
+  Write-Host 'Đang cài bản mới…' -ForegroundColor Cyan
+  $process = Start-Process -FilePath $installer -ArgumentList '--update' -Wait -PassThru
   if ($process.ExitCode -ne 0) { throw "Bộ cài kết thúc với mã $($process.ExitCode)." }
   $newPackage = Get-Content -LiteralPath (Join-Path $installRoot 'package.json') -Raw | ConvertFrom-Json
   if ([version]$newPackage.version -ne $latestVersion) { throw 'Bộ cài đã đóng nhưng phiên bản trong thư mục cài đặt chưa thay đổi.' }
   Write-Host "Đã chạy bộ cài v$latestVersion. Dữ liệu và tài khoản Muse được giữ trong thư mục người dùng." -ForegroundColor Green
+  Set-LauncherProgress 'complete' ("Đã cài v{0}. Đang mở K Studio…" -f $latestVersion) $installer ([long]$asset.size)
   if ($StartupCheck) { $global:KStudioStartupUpdateInstalled = $true }
 } finally {
   if (Test-Path -LiteralPath $downloadDir) { Remove-Item -LiteralPath $downloadDir -Recurse -Force -ErrorAction SilentlyContinue }

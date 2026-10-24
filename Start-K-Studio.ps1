@@ -1,4 +1,6 @@
-﻿$ErrorActionPreference = 'Stop'
+﻿param([switch]$SkipUpdateCheck, [string]$LauncherProgressFile)
+
+$ErrorActionPreference = 'Stop'
 $project = Split-Path -Parent $MyInvocation.MyCommand.Path
 $appVersion = (Get-Content -LiteralPath (Join-Path $project 'package.json') -Raw | ConvertFrom-Json).version
 $buildVersion = 'kstudio-localdata-v53'
@@ -72,10 +74,13 @@ if ($listener) {
 # Check GitHub Releases each time the installed app starts. The updater returns
 # immediately when current, or asks before installing a newer release.
 $startupUpdater = Join-Path $project 'Update-K-Studio-Installed.ps1'
-if (Test-Path -LiteralPath $startupUpdater) {
+if (-not $SkipUpdateCheck -and (Test-Path -LiteralPath $startupUpdater)) {
   $global:KStudioStartupUpdateInstalled = $false
-  try { & $startupUpdater -StartupCheck }
-  catch { Write-Host "Khong kiem tra duoc cap nhat; van mo K Studio hien tai. $($_.Exception.Message)" -ForegroundColor Yellow }
+  try { & $startupUpdater -StartupCheck -ProgressFile $LauncherProgressFile }
+  catch {
+    if ($LauncherProgressFile) { [IO.File]::WriteAllText($LauncherProgressFile, "error`r`nKhông kiểm tra được cập nhật; vẫn mở bản hiện tại.`r`n`r`n0", [Text.Encoding]::UTF8) }
+    Write-Host "Khong kiem tra duoc cap nhat; van mo K Studio hien tai. $($_.Exception.Message)" -ForegroundColor Yellow
+  }
   if ($global:KStudioStartupUpdateInstalled) {
     Write-Host 'Da cap nhat K Studio. Bo cai da mo phien ban moi.' -ForegroundColor Green
     exit 0
