@@ -27,14 +27,37 @@ async function responseForPrompt(page, prompt) {
       const buttons = replies.flatMap(row => [...row.querySelectorAll('button[aria-label]')]);
       const images = [...document.querySelectorAll('button[aria-label^="Open generated image"]')];
       const videos = [...document.querySelectorAll('button[aria-label^="Open generated video"],button[aria-label^="Open animated video"]')];
+      const embeddedVideos = [...document.querySelectorAll('video')];
       const downloads = [...document.querySelectorAll('button[aria-label="Download video"]')];
       const image = buttons.filter(button => images.includes(button)).at(-1);
       const video = buttons.filter(button => videos.includes(button)).at(-1);
+      const embeddedVideo = replies.flatMap(row => [...row.querySelectorAll('video')]).at(-1);
       const direct = buttons.filter(button => downloads.includes(button)).at(-1);
-      return { matched: true, replyText: replies.map(row => row.innerText || '').join('\n').slice(0, 3000), imageIndex: image ? images.indexOf(image) : -1, videoIndex: video ? videos.indexOf(video) : -1, directDownloadIndex: direct ? downloads.indexOf(direct) : -1 };
+      return { matched: true, replyText: replies.map(row => row.innerText || '').join('\n').slice(0, 3000), imageIndex: image ? images.indexOf(image) : -1, videoIndex: video ? videos.indexOf(video) : -1, embeddedVideoIndex: embeddedVideo ? embeddedVideos.indexOf(embeddedVideo) : -1, directDownloadIndex: direct ? downloads.indexOf(direct) : -1 };
     }
-    return { matched: false, replyText: '', imageIndex: -1, videoIndex: -1, directDownloadIndex: -1 };
+    return { matched: false, replyText: '', imageIndex: -1, videoIndex: -1, embeddedVideoIndex: -1, directDownloadIndex: -1 };
   }, prompt);
+}
+
+async function saveEmbeddedVideo(page, videoIndex, tempDir, jobId) {
+  const payload = await page.evaluate(async index => {
+    const video = [...document.querySelectorAll('video')][index];
+    const source = video?.currentSrc || video?.src || video?.querySelector('source')?.src;
+    if (!source) throw new Error('Muse không có đường dẫn video để tải.');
+    const response = await fetch(source);
+    if (!response.ok) throw new Error(`Không tải được video nhúng (HTTP ${response.status}).`);
+    const blob = await response.blob();
+    const bytes = new Uint8Array(await blob.arrayBuffer());
+    let binary = '';
+    for (let offset = 0; offset < bytes.length; offset += 32768) binary += String.fromCharCode(...bytes.subarray(offset, offset + 32768));
+    return { base64: btoa(binary), mimeType: blob.type };
+  }, videoIndex);
+  const extension = /webm/i.test(payload.mimeType) ? '.webm' : /quicktime/i.test(payload.mimeType) ? '.mov' : '.mp4';
+  fs.mkdirSync(tempDir, { recursive: true });
+  const tempPath = path.join(tempDir, `${jobId}${extension}`);
+  fs.writeFileSync(tempPath, Buffer.from(payload.base64, 'base64'));
+  if (!fs.statSync(tempPath).size) throw new Error('Muse trả video rỗng.');
+  return tempPath;
 }
 
 function checkError(response) {
@@ -66,12 +89,17 @@ async function runTask(page, payload) {
     response = await responseForPrompt(page, payload.prompt);
     if (response.matched) {
       checkError(response);
-      if (payload.type === 'Ảnh' ? response.imageIndex >= 0 : response.videoIndex >= 0 || response.directDownloadIndex >= 0) break;
+      if (payload.type === 'Ảnh' ? response.imageIndex >= 0 : response.videoIndex >= 0 || response.embeddedVideoIndex >= 0 || response.directDownloadIndex >= 0) break;
     }
     await page.waitForTimeout(1200);
   }
-  const ready = response && (payload.type === 'Ảnh' ? response.imageIndex >= 0 : response.videoIndex >= 0 || response.directDownloadIndex >= 0);
+  const ready = response && (payload.type === 'Ảnh' ? response.imageIndex >= 0 : response.videoIndex >= 0 || response.embeddedVideoIndex >= 0 || response.directDownloadIndex >= 0);
   if (!ready) throw new Error(`Muse chưa hiện ${payload.type.toLowerCase()} gắn với prompt này trong thời gian chờ tối đa.`);
+  if (payload.type === 'Video' && response.videoIndex < 0 && response.directDownloadIndex < 0) {
+    const tempPath = await saveEmbeddedVideo(page, response.embeddedVideoIndex, payload.tempDir, payload.jobId);
+    const quota = await readMuseQuota(page).catch(() => null);
+    return { jobId: payload.jobId, lane: payload.lane, ok: true, tempPath, quota, chatUrl: page.url() };
+  }
   let button;
   let openedDialog = false;
   if (payload.type === 'Ảnh') {
@@ -118,8 +146,12 @@ async function run(payload) {
   } finally { await context.close().catch(() => {}); }
 }
 
-process.on('message', async payload => {
-  try { process.send(await run(payload)); }
-  catch (error) { process.send({ ok: false, error: error.message, code: error.code || 'KSTUDIO_ERROR' }); }
-  finally { process.disconnect(); }
-});
+module.exports = { responseForPrompt, runTask, saveEmbeddedVideo };
+
+if (require.main === module) {
+  process.on('message', async payload => {
+    try { process.send(await run(payload)); }
+    catch (error) { process.send({ ok: false, error: error.message, code: error.code || 'KSTUDIO_ERROR' }); }
+    finally { process.disconnect(); }
+  });
+}
