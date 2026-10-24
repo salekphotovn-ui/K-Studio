@@ -1,4 +1,4 @@
-$ErrorActionPreference = 'Stop'
+﻿$ErrorActionPreference = 'Stop'
 $project = Split-Path -Parent $MyInvocation.MyCommand.Path
 $appVersion = (Get-Content -LiteralPath (Join-Path $project 'package.json') -Raw | ConvertFrom-Json).version
 $buildVersion = 'kstudio-localdata-v53'

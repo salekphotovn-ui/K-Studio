@@ -1,4 +1,4 @@
-param([switch]$StartupCheck)
+﻿param([switch]$StartupCheck)
 
 $ErrorActionPreference = 'Stop'
 $installRoot = Split-Path -Parent $MyInvocation.MyCommand.Path

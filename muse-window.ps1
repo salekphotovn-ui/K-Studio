@@ -1,4 +1,4 @@
-param(
+﻿param(
   [Parameter(Mandatory = $true)][ValidateSet('hide', 'show', 'watch')][string]$Action,
   [Parameter(Mandatory = $true)][string]$ProfileDir,
   [long]$KnownHandle = 0,

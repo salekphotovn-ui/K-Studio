@@ -103,12 +103,9 @@ async function run(payload) {
     try { await textbox.waitFor({ state: 'visible', timeout: 30000 }); }
     catch { const error = new Error('Phiên Muse cần đăng nhập lại.'); error.code = 'MUSE_LOGIN_REQUIRED'; throw error; }
     if (payload.referenceImagePath) {
-      const attach = page.locator('button[aria-label="Attach file"]').first();
-      if (!await attach.count()) throw new Error('Không tìm thấy nút đính kèm ảnh trên Muse.');
-      const chooserPromise = page.waitForEvent('filechooser', { timeout: 10000 });
-      await attach.click();
-      const chooser = await chooserPromise;
-      await chooser.setFiles(payload.referenceImagePath);
+      const fileInput = page.locator('input[type="file"]').first();
+      await fileInput.waitFor({ state: 'attached', timeout: 10000 });
+      await fileInput.setInputFiles(payload.referenceImagePath);
       await page.getByRole('button', { name: 'Remove attachment', exact: true }).first().waitFor({ state: 'visible', timeout: 15000 });
       await page.waitForTimeout(700);
     }
