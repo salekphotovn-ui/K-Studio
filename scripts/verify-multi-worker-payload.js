@@ -1,22 +1,19 @@
 const assert = require('node:assert/strict');
 const path = require('node:path');
-const childProcess = require('node:child_process');
 const { chromium } = require('playwright-core');
 
-const originalSpawnSync = childProcess.spawnSync;
 const originalLaunch = chromium.launchPersistentContext;
-const hideCalls = [];
 const profileDir = path.join(process.cwd(), '.unused-test-profile');
 let closed = false;
+let launchOptions;
 
-childProcess.spawnSync = (command, args) => {
-  hideCalls.push({ command, args });
-  return { status: 0 };
-};
-chromium.launchPersistentContext = async () => ({
+chromium.launchPersistentContext = async (_profile, options) => {
+  launchOptions = options;
+  return ({
   pages: () => [page],
   close: async () => { closed = true; },
-});
+  });
+};
 
 const page = {
   goto: async () => {},
@@ -33,16 +30,9 @@ async function main() {
     });
     assert.equal(result.results[0].code, 'MUSE_LOGIN_REQUIRED');
     assert.equal(closed, true);
-    if (process.platform === 'win32') {
-      assert.equal(hideCalls.length, 2);
-      for (const call of hideCalls) {
-        assert.equal(call.args[call.args.indexOf('-File') + 1], path.join(process.cwd(), 'muse-window.ps1'));
-        assert.ok(call.args.includes(profileDir));
-      }
-    }
-    console.log('Multi-worker receives the window script and profile paths.');
+    assert.equal(launchOptions.headless, true);
+    console.log('Multi-worker runs without a native Chrome window.');
   } finally {
-    childProcess.spawnSync = originalSpawnSync;
     chromium.launchPersistentContext = originalLaunch;
   }
 }

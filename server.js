@@ -65,6 +65,7 @@ if(Number(settings.multiLaneVersion||0)<2){
   persistSettings();
 }
 let museContext = null;
+let museContextHeadless = false;
 let musePage = null;
 let museAccountId = 'default';
 let museWindowHandle = 0;
@@ -211,6 +212,7 @@ async function discardStaleMuseContext() {
   await stopMuseWindowWatcher();
   const stale = museContext;
   museContext = null;
+  museContextHeadless = false;
   musePage = null;
   museWindowHandle = 0;
   museState = 'disconnected';
@@ -255,6 +257,28 @@ async function runBatch(batch) {
   for (const job of batch.jobs) job.status = 'Cần kết nối Muse';
   persistHistory();
 }
+async function launchMuseContext(profile, headless, hidden) {
+  const context = await chromium.launchPersistentContext(profile, {
+    executablePath: CHROME_PATH,
+    headless,
+    viewport: MUSE_LOGIN_VIEWPORT,
+    ...(!headless ? { args: ['--window-size=800,600', ...(hidden ? ['--window-position=-32000,-32000','--start-minimized'] : [])] } : {}),
+    acceptDownloads: true,
+  });
+  museContext = context;
+  museContextHeadless = headless;
+  if (hidden && !headless) startMuseWindowWatcher(profile);
+  context.on('close', () => {
+    if (museContext === context) {
+      stopMuseWindowWatcher().catch(() => {});
+      museContext = null;
+      museContextHeadless = false;
+      musePage = null;
+      museWindowHandle = 0;
+      museState = 'disconnected';
+    }
+  });
+}
 async function connectMuse(accountId='default', hidden=false) {
   if (museConnectPromise) return museConnectPromise;
   museConnectPromise = (async () => {
@@ -262,41 +286,31 @@ async function connectMuse(accountId='default', hidden=false) {
     if(!account||!account.enabled) throw new Error('Tài khoản không tồn tại hoặc đã tắt.');
     if (museContext && !museContextIsAlive()) await discardStaleMuseContext();
     if(museContext && museContext.pages().length && museAccountId!==accountId) await discardStaleMuseContext();
+    if(museContext && museContextHeadless && !hidden) await discardStaleMuseContext();
     if (!museContext || museContext.pages().length === 0) {
       if(!CHROME_PATH)throw new Error('Không tìm thấy Google Chrome trên máy. Hãy cài Chrome hoặc đặt KSTUDIO_CHROME_PATH.');
       const profile=accountId==='default'?MUSE_PROFILE:path.join(DATA_ROOT,'.muse-profiles',accountId);
       fs.mkdirSync(profile,{recursive:true}); account.profileDir=profile;
-      museContext = await chromium.launchPersistentContext(profile, {
-        executablePath: CHROME_PATH,
-        headless: false,
-        // Keep the Muse login window compact so it can sit beside K Studio.
-        viewport: MUSE_LOGIN_VIEWPORT,
-        args: ['--window-size=800,600', ...(hidden ? ['--window-position=-32000,-32000','--start-minimized'] : [])],
-        acceptDownloads: true,
-      });
-      // Startup quota/session reads should stay out of sight for saved sessions.
-      // Begin hiding as soon as Chrome exists instead of waiting for Muse to load
-      // and quota parsing to finish, which can flash a minimized window on screen.
-      if (hidden) startMuseWindowWatcher(profile);
-      const launchedContext = museContext;
-      launchedContext.on('close', () => {
-        if (museContext === launchedContext) {
-          stopMuseWindowWatcher().catch(() => {});
-          museContext = null;
-          musePage = null;
-          museWindowHandle = 0;
-          museState = 'disconnected';
-        }
-      });
+      await launchMuseContext(profile, hidden && accountHasSavedSession(account), hidden);
     }
     museAccountId=accountId;
     musePage = museContext.pages()[0] || await museContext.newPage();
-    if (!hidden) await setMuseWindowState('normal');
+    if (!hidden && !museContextHeadless) await setMuseWindowState('normal');
     if(!/^https?:\/\/(www\.)?muse\.ai\//i.test(musePage.url())) await musePage.goto('https://muse.ai/', { waitUntil: 'domcontentloaded' });
     await musePage.waitForTimeout(1500);
     museState = await isMuseReady(musePage) ? 'ready' : 'login_required';
     await musePage.setViewportSize(museState==='ready'?MUSE_READY_VIEWPORT:MUSE_LOGIN_VIEWPORT);
     if (museState === 'ready') await refreshAccountQuota(musePage, account);
+    if (museState === 'login_required' && museContextHeadless) {
+      // A saved profile can expire. Reopen only that account with a visible
+      // window so the user can log in without a taskbar flash on healthy runs.
+      await discardStaleMuseContext();
+      await launchMuseContext(account.profileDir, false, false);
+      museAccountId=accountId;
+      musePage=museContext.pages()[0] || await museContext.newPage();
+      await musePage.goto('https://muse.ai/', { waitUntil: 'domcontentloaded' });
+      museState='login_required';
+    }
     const windowState=hidden && museState==='ready' ? 'hidden' : 'normal';
     if (!await setMuseWindowState(windowState)) throw new Error(windowState==='hidden'?'Không ẩn được cửa sổ Muse; đã dừng trước khi gửi tác vụ.':'Không hiện được cửa sổ Muse để đăng nhập.');
     return museStatus();
@@ -306,6 +320,7 @@ async function connectMuse(accountId='default', hidden=false) {
 }
 async function setMuseWindowState(windowState) {
   if(!museContext) return false;
+  if(museContextHeadless) return windowState==='hidden';
   try {
     const account=accounts.find(a=>a.id===museAccountId);
     if(!account)return false;

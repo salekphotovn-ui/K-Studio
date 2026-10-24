@@ -1,15 +1,7 @@
 const fs = require('node:fs');
 const path = require('node:path');
-const { spawnSync } = require('node:child_process');
 const { chromium } = require('playwright-core');
 const { readMuseQuota } = require('./muse-quota');
-
-function hideWindow(root, profile) {
-  spawnSync('powershell.exe', [
-    '-NoProfile', '-NonInteractive', '-ExecutionPolicy', 'Bypass',
-    '-File', path.join(root, 'muse-window.ps1'), 'hide', profile, '0', '0', '1180', '850',
-  ], { windowsHide: true, encoding: 'utf8', timeout: 12000 });
-}
 
 async function responseForPrompt(page, prompt) {
   return page.evaluate(promptText => {
@@ -89,17 +81,13 @@ function scopedError(response) {
 async function run(payload) {
   const context = await chromium.launchPersistentContext(payload.profileDir, {
     executablePath: payload.chromePath,
-    headless: false,
+    headless: true,
     viewport: { width: 1160, height: 740 },
-    // Keep the first about:blank window off-screen before the hide script can run.
-    args: ['--window-size=1180,850', '--window-position=-32000,-32000', '--start-minimized'],
     acceptDownloads: true,
   });
   try {
-    hideWindow(payload.root, payload.profileDir);
     const page = context.pages()[0] || await context.newPage();
     await page.goto(payload.chatUrl || 'https://muse.ai/thread/new', { waitUntil: 'domcontentloaded' });
-    hideWindow(payload.root, payload.profileDir);
     const textbox = page.getByRole('textbox', { name: /Message/i }).first();
     try { await textbox.waitFor({ state: 'visible', timeout: 30000 }); }
     catch { const error = new Error('Phiên Muse cần đăng nhập lại.'); error.code = 'MUSE_LOGIN_REQUIRED'; throw error; }
