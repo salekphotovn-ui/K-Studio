@@ -145,7 +145,10 @@ async function run(payload) {
     await downloadButton.click();
     const download = await downloadPromise;
     fs.mkdirSync(payload.tempDir, { recursive: true });
-    const extension = path.extname(download.suggestedFilename()) || (payload.type === 'Ảnh' ? '.webp' : '.mp4');
+    // Chromium may omit a suggested filename for blob-backed downloads. Keep
+    // path.extname from receiving undefined, and use a stable type fallback.
+    const suggestedFilename = String(download.suggestedFilename() || '').trim();
+    const extension = path.extname(suggestedFilename) || (payload.type === 'Ảnh' ? '.webp' : '.mp4');
     const tempPath = path.join(payload.tempDir, `${payload.jobId}${extension}`);
     await download.saveAs(tempPath);
     const quota = await readMuseQuota(page).catch(() => null);
