@@ -222,6 +222,15 @@ function respond(res, status, body, type='application/json; charset=utf-8') {
   res.end(typeof body === 'string' ? body : JSON.stringify(body));
 }
 function outputRootDir(){const configured=path.resolve(settings.outputDir||DEFAULT_SETTINGS.outputDir);return path.basename(configured).toLowerCase()==='images'?path.dirname(configured):configured}
+function outputFileForDeletion(value){
+  const root=outputRootDir(),target=path.resolve(String(value||'')),relative=path.relative(root,target);
+  if(!value||relative==='..'||relative.startsWith(`..${path.sep}`)||path.isAbsolute(relative))throw new Error('File kết quả nằm ngoài thư mục lưu.');
+  if(!fs.existsSync(target))return null;
+  const rootReal=fs.realpathSync(root),targetReal=fs.realpathSync(target),realRelative=path.relative(rootReal,targetReal);
+  if(realRelative==='..'||realRelative.startsWith(`..${path.sep}`)||path.isAbsolute(realRelative))throw new Error('File kết quả nằm ngoài thư mục lưu.');
+  if(!fs.statSync(targetReal).isFile())throw new Error('Chỉ có thể xóa file kết quả, không xóa thư mục.');
+  return target;
+}
 function resolveOutputFile(value){const root=outputRootDir(),relative=String(value||'').trim();if(!relative)return null;const target=path.resolve(root,relative),fromRoot=path.relative(root,target);if(fromRoot==='..'||fromRoot.startsWith(`..${path.sep}`)||path.isAbsolute(fromRoot))return null;return target}
 function openInExplorer(target,selectFile=false){return new Promise((resolve,reject)=>{const argument=selectFile?`/select,${target}`:target,child=spawn('explorer.exe',[argument],{detached:true,stdio:'ignore',windowsHide:false});child.once('error',reject);child.once('spawn',()=>{child.unref();resolve()})})}
 function bodyJson(req) {
@@ -239,7 +248,7 @@ function detect(prompt) {
 }
 function publicBatch(batch) {
   const root=outputRootDir();
-  return {id:batch.id,status:batch.status,workers:batch.workers,accountId:batch.accountId||'default',activeAccountId:batch.activeAccountId||null,createdAt:batch.createdAt,jobs:batch.jobs.map(j=>{let outputSize=null,outputRelativePath=null;try{if(j.outputPath){outputRelativePath=path.relative(root,path.resolve(j.outputPath));if(fs.existsSync(j.outputPath))outputSize=fs.statSync(j.outputPath).size}}catch{}const outputUrl=outputRelativePath?'/api/output/'+outputRelativePath.split(path.sep).map(encodeURIComponent).join('/'):null;return{id:j.id,prompt:j.prompt,type:j.type,status:j.status,error:j.error||null,accountId:j.accountId||null,outputPath:j.outputPath||null,outputRelativePath,outputUrl,outputSize,hasReferenceImage:Boolean(j.referenceImagePath),referenceName:j.referenceName||null,startedAt:j.startedAt||null,finishedAt:j.finishedAt||null,quotaBeforePct:j.quotaBeforePct??null,quotaAfterPct:j.quotaAfterPct??null,quotaDeltaPct:j.quotaDeltaPct??null}})};
+  return {id:batch.id,status:batch.status,active:runningBatches.has(batch.id)||scheduledBatches.has(batch.id),workers:batch.workers,accountId:batch.accountId||'default',activeAccountId:batch.activeAccountId||null,createdAt:batch.createdAt,jobs:batch.jobs.map(j=>{let outputSize=null,outputRelativePath=null;try{if(j.outputPath){outputRelativePath=path.relative(root,path.resolve(j.outputPath));if(fs.existsSync(j.outputPath))outputSize=fs.statSync(j.outputPath).size}}catch{}const outputUrl=outputRelativePath?'/api/output/'+outputRelativePath.split(path.sep).map(encodeURIComponent).join('/'):null;return{id:j.id,prompt:j.prompt,type:j.type,status:j.status,error:j.error||null,accountId:j.accountId||null,outputPath:j.outputPath||null,outputRelativePath,outputUrl,outputSize,hasReferenceImage:Boolean(j.referenceImagePath),referenceName:j.referenceName||null,startedAt:j.startedAt||null,finishedAt:j.finishedAt||null,quotaBeforePct:j.quotaBeforePct??null,quotaAfterPct:j.quotaAfterPct??null,quotaDeltaPct:j.quotaDeltaPct??null}})};
 }
 async function runBatch(batch) {
   batch.status = 'Cần kết nối Muse';
@@ -626,21 +635,21 @@ const server=http.createServer(async(req,res)=>{
     try {
       const data=await bodyJson(req),ids=Array.isArray(data.ids)?Array.from(new Set(data.ids.map(String))):[];
       if(!ids.length)return respond(res,400,{error:'Chưa chọn tác vụ để xóa.'});
-      if(ids.length>200)return respond(res,400,{error:'Chỉ xóa tối đa 200 tác vụ mỗi lần.'});
-      const removable=new Set(['Trong hàng đợi','Cần xem lại','Cần kết nối Muse','Cần đăng nhập Muse','Lỗi kết nối Muse','Chờ đăng nhập Muse','Lỗi']);
-      const deleted=[],skipped=[];
-      for(const id of ids){
-        let found=false;
-        for(const batch of batches.values()){
-          const index=batch.jobs.findIndex(job=>job.id===id);if(index<0)continue;
-          found=true;const job=batch.jobs[index];
-          if(!removable.has(job.status)){skipped.push(id);break;}
-          if(job.outputPath){const root=outputRootDir(),target=path.resolve(job.outputPath),relative=path.relative(root,target);if(relative==='..'||relative.startsWith(`..${path.sep}`)||path.isAbsolute(relative))return respond(res,400,{error:'File kết quả nằm ngoài thư mục lưu.'});if(fs.existsSync(target))fs.unlinkSync(target);}
-          batch.jobs.splice(index,1);deleted.push(id);if(!batch.jobs.length)batches.delete(batch.id);break;
-        }
-        if(!found)skipped.push(id);
-      }
-      persistHistory();return respond(res,200,{ok:true,deleted,skipped});
+      if(ids.length>20000)return respond(res,400,{error:'Chỉ xóa tối đa 20.000 tác vụ mỗi lần.'});
+      const activeStatuses=new Set(['Đang tạo trên Muse','Đang gửi lên Muse']);
+      const byId=new Map();for(const batch of batches.values())for(const job of batch.jobs)byId.set(job.id,{batch,job});
+      const selected=ids.map(id=>byId.get(id)).filter(Boolean);
+      const isActive=item=>runningBatches.has(item.batch.id)||scheduledBatches.has(item.batch.id)||activeStatuses.has(item.job.status);
+      const deletable=selected.filter(item=>!isActive(item)),deletableIds=new Set(deletable.map(item=>item.job.id)),skipped=ids.filter(id=>!byId.has(id)||isActive(byId.get(id)));
+      // Validate every result path before changing history or removing any files.
+      const files=new Set();
+      for(const {job} of deletable)if(job.outputPath){const file=outputFileForDeletion(job.outputPath);if(file)files.add(file)}
+      const remainingFiles=new Set();for(const batch of batches.values())for(const job of batch.jobs)if(!deletableIds.has(job.id)&&job.outputPath)remainingFiles.add(path.resolve(job.outputPath));
+      for(const file of files)if(remainingFiles.has(path.resolve(file)))files.delete(file);
+      for(const file of files)fs.unlinkSync(file);
+      const deleted=[];
+      for(const {batch,job} of deletable){const index=batch.jobs.findIndex(item=>item.id===job.id);if(index>=0){batch.jobs.splice(index,1);deleted.push(job.id);if(!batch.jobs.length)batches.delete(batch.id)}}
+      persistHistory();return respond(res,200,{ok:true,deleted,skipped,removedFiles:files.size});
     } catch(e) { return respond(res,500,{error:e.message}); }
   }
   if(req.method==='DELETE' && url.pathname.startsWith('/api/jobs/')) { try { const id=decodeURIComponent(url.pathname.slice('/api/jobs/'.length));let owner=null,index=-1;for(const batch of batches.values()){index=batch.jobs.findIndex(job=>job.id===id);if(index>=0){owner=batch;break}}if(!owner)return respond(res,404,{error:'Không tìm thấy tác vụ.'});const job=owner.jobs[index];if(job.outputPath){const outputRoot=outputRootDir(),target=path.resolve(job.outputPath),relative=path.relative(outputRoot,target);if(relative.startsWith('..')||path.isAbsolute(relative))return respond(res,400,{error:'File kết quả nằm ngoài thư mục lưu.'});if(fs.existsSync(target))fs.unlinkSync(target)}owner.jobs.splice(index,1);if(!owner.jobs.length)batches.delete(owner.id);persistHistory();return respond(res,200,{ok:true}); } catch(e) { return respond(res,500,{error:e.message}); } }
