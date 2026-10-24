@@ -45,7 +45,7 @@ Trong **Cài đặt → API cục bộ cho AI khác**, bấm **Sao chép** để
 
 `type` là `image` hoặc `video`. `job_id` và `items[].id` chỉ dùng chữ Latin, số, `-`, `_`; mỗi item cần một ID duy nhất. Tối đa 300 item và 10 ảnh tham chiếu mỗi lô, ảnh tối đa 6 MB. Nếu không có `output_dir`, kết quả vào thư mục output K Studio: `videos/<job_id>` hoặc `images/<job_id>`. Nếu có, đó phải là đường dẫn tuyệt đối trên **máy này**; kết quả nằm trực tiếp trong thư mục đã chỉ định. API không ghi đè file cũ.
 
-Mỗi tài khoản dùng chung Main chat Muse; `workers` nhận số nguyên từ `1` đến `4`; nếu bỏ qua, API lấy số luồng ảnh/video trong Cài đặt K Studio. Luồng chạy song song trong tài khoản được chọn; K Studio ghép phản hồi theo prompt. Nếu Muse từ chối do hạn mức, phần việc chưa gửi mới tiếp tục trên tài khoản kế tiếp. `GET /api/health` và phản hồi của lô báo số luồng đã cấu hình.
+Mỗi tài khoản dùng một Main chat Muse và chỉ nhận một tác vụ tại một thời điểm. `workers` nhận số nguyên từ `1` đến `10`; nếu bỏ qua, API lấy số luồng ảnh/video trong Cài đặt K Studio. Bản nâng cấp đặt ảnh và video về 10 luồng mặc định một lần. Số tác vụ đồng thời thực tế không vượt quá số tài khoản đang bật, sẵn sàng và số item đang chờ. `GET /api/health` báo `capabilities.max_workers: 10` và `workers_per_account: 1`. Nếu Muse từ chối do hạn mức, phần việc chưa gửi mới tiếp tục trên tài khoản kế tiếp.
 
 Ảnh tham chiếu có thể gửi qua đường dẫn `image` trên cùng máy, hoặc qua `image_data` dạng `data:image/webp;base64,...`. Mỗi item video nhận tối đa một ảnh. Với tác vụ ảnh, bỏ cả hai trường. K Studio chép ảnh vào vùng dữ liệu riêng trước khi xếp hàng, nên file gốc có thể tiếp tục được dùng.
 

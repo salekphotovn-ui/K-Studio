@@ -155,7 +155,7 @@ function startLocalApi(deps) {
   const api = http.createServer(async (req, res) => {
     if (!authorized(req)) return send(res, 401, { error: 'API key không hợp lệ.' });
     const url = new URL(req.url, 'http://localhost');
-    if (req.method === 'GET' && url.pathname === '/api/health') return send(res, 200, { ok: true, version: require('./package.json').version, quota_threshold_pct: defaultQuotaThreshold(), default_workers: { image: defaultWorkerCount('Ảnh'), video: defaultWorkerCount('Video') }, accounts: accounts.filter(account => account.enabled).map(account => ({ name: account.name, ready: accountReady(account), quota_blocked: Boolean(account.quotaBlockedAt), estimated_next_image_pct: Math.max(1, Number(account.imageCostBufferPct) || 0), estimated_next_video_pct: Math.max(4, Number(account.videoCostBufferPct) || 0), ...quotaSnapshot(account) })), running_jobs: runningBatches.size });
+    if (req.method === 'GET' && url.pathname === '/api/health') return send(res, 200, { ok: true, version: require('./package.json').version, quota_threshold_pct: defaultQuotaThreshold(), default_workers: { image: defaultWorkerCount('Ảnh'), video: defaultWorkerCount('Video') }, capabilities: { max_workers: 10, workers_per_account: 1, scheduling: 'one-per-account', video_reference_image: true, video_result_download: true }, accounts: accounts.filter(account => account.enabled).map(account => ({ name: account.name, ready: accountReady(account), quota_blocked: Boolean(account.quotaBlockedAt), estimated_next_image_pct: Math.max(1, Number(account.imageCostBufferPct) || 0), estimated_next_video_pct: Math.max(4, Number(account.videoCostBufferPct) || 0), ...quotaSnapshot(account) })), running_jobs: runningBatches.size });
     if (req.method === 'POST' && url.pathname === '/api/jobs') {
       try {
         const data = await readJson(req);
@@ -164,7 +164,7 @@ function startLocalApi(deps) {
         const type = data.type === 'video' ? 'Video' : data.type === 'image' ? 'Ảnh' : null;
         if (!type) return send(res, 400, { error: 'type phải là image hoặc video.' });
         const requestedWorkers = data.workers == null ? null : Number(data.workers);
-        const workerMaximum = 5;
+        const workerMaximum = 10;
         if (requestedWorkers != null && (!Number.isInteger(requestedWorkers) || requestedWorkers < 1 || requestedWorkers > workerMaximum)) return send(res, 422, { error: `workers của ${type === 'Video' ? 'video' : 'ảnh'} phải là số nguyên từ 1 đến ${workerMaximum}.` });
         if (!Array.isArray(data.items) || !data.items.length || data.items.length > 300) return send(res, 400, { error: 'Mỗi lô cần 1–300 item.' });
         if (data.items.filter(item => item.image_data != null).length > 10) return send(res, 400, { error: 'Tối đa 10 ảnh base64 mỗi lô; dùng đường dẫn image trên máy cho lô lớn.' });

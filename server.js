@@ -42,7 +42,8 @@ const SETTINGS_FILE = path.join(DATA_ROOT, 'settings.json');
 const ACCOUNTS_FILE = path.join(DATA_ROOT, 'accounts.json');
 const ACCOUNTS_BACKUP_FILE = path.join(DATA_ROOT, 'accounts.backup.json');
 const REFERENCE_DIR = path.join(DATA_ROOT, '.uploads', 'references');
-const DEFAULT_SETTINGS = { outputDir: path.join(DATA_ROOT, 'output'), imageWorkers: 5, videoWorkers: 5, imageTimeout: 6, videoTimeout: 12, promptSeparator: '', allowedDomainsEnabled: true, allowedDomains: 'huggingface.co', autoReservePercent: 5, imageAccountId: '', videoAccountMode: 'all' };
+const MAX_WORKERS = 10;
+const DEFAULT_SETTINGS = { outputDir: path.join(DATA_ROOT, 'output'), imageWorkers: MAX_WORKERS, videoWorkers: MAX_WORKERS, imageTimeout: 6, videoTimeout: 12, promptSeparator: '', allowedDomainsEnabled: true, allowedDomains: 'huggingface.co', autoReservePercent: 5, imageAccountId: '', videoAccountMode: 'all' };
 const outputReservations = new Set();
 let settings = { ...DEFAULT_SETTINGS };
 try { settings = { ...settings, ...JSON.parse(fs.readFileSync(SETTINGS_FILE, 'utf8')) }; } catch {}
@@ -79,8 +80,9 @@ function persistHistory() {
 }
 function persistSettings() { fs.writeFileSync(SETTINGS_FILE, JSON.stringify(settings, null, 2), 'utf8'); }
 if(Number(settings.imageWorkerLimitVersion||0)<5){if(Number(settings.imageWorkers)===3)settings.imageWorkers=5;settings.imageWorkerLimitVersion=5;persistSettings()}
-settings.imageWorkers=Math.max(1,Math.min(5,Number(settings.imageWorkers)||DEFAULT_SETTINGS.imageWorkers));
-settings.videoWorkers=Math.max(1,Math.min(5,Number(settings.videoWorkers)||DEFAULT_SETTINGS.videoWorkers));
+if(Number(settings.workerLimitVersion||0)<1){settings.imageWorkers=MAX_WORKERS;settings.videoWorkers=MAX_WORKERS;settings.workerLimitVersion=1;persistSettings()}
+settings.imageWorkers=Math.max(1,Math.min(MAX_WORKERS,Number(settings.imageWorkers)||DEFAULT_SETTINGS.imageWorkers));
+settings.videoWorkers=Math.max(1,Math.min(MAX_WORKERS,Number(settings.videoWorkers)||DEFAULT_SETTINGS.videoWorkers));
 function persistAccounts() {
   fs.mkdirSync(path.dirname(ACCOUNTS_FILE),{recursive:true});
   const serialized=JSON.stringify(accounts,null,2);
@@ -468,7 +470,7 @@ async function runMuseBatch(batch) {
       const ordered=start>0?[...eligible.slice(start),...eligible.slice(0,start)]:eligible;
       const configured=type==='Ảnh'?settings.imageWorkers:settings.videoWorkers;
       const requested=presentTypes.length===1?(batch.workers||configured):configured;
-      const maximum=5;
+      const maximum=MAX_WORKERS;
       const pool=ordered.slice(0,Math.min(maximum,requested,pending.length));
       if(!pool.length){batch.status='Tạm dừng: thiếu tài khoản phù hợp';batch.error=type==='Ảnh'?'Không có tài khoản Muse đang bật để tạo ảnh.':'Không có tài khoản Muse phù hợp để tạo video.';persistHistory();return}
       batch.workers=Math.max(batch.workers||0,pool.length);batch.activeAccountId=pool[0].id;
@@ -536,8 +538,8 @@ const server=http.createServer(async(req,res)=>{
     try {
       const data=await bodyJson(req);
       if(data.outputDir!==undefined) { const p=path.resolve(String(data.outputDir)); if(!path.isAbsolute(p)) return respond(res,400,{error:'Thư mục lưu không hợp lệ.'}); settings.outputDir=p; }
-      if(data.imageWorkers!==undefined)settings.imageWorkers=Math.max(1,Math.min(5,Number(data.imageWorkers)||DEFAULT_SETTINGS.imageWorkers));
-      if(data.videoWorkers!==undefined)settings.videoWorkers=Math.max(1,Math.min(5,Number(data.videoWorkers)||DEFAULT_SETTINGS.videoWorkers));
+      if(data.imageWorkers!==undefined)settings.imageWorkers=Math.max(1,Math.min(MAX_WORKERS,Number(data.imageWorkers)||DEFAULT_SETTINGS.imageWorkers));
+      if(data.videoWorkers!==undefined)settings.videoWorkers=Math.max(1,Math.min(MAX_WORKERS,Number(data.videoWorkers)||DEFAULT_SETTINGS.videoWorkers));
       for(const key of ['imageTimeout','videoTimeout']) if(data[key]!==undefined) settings[key]=Math.max(1,Math.min(240,Number(data[key])||DEFAULT_SETTINGS[key]));
       for(const key of ['allowedDomainsEnabled','allowedDomains','promptSeparator','autoReservePercent']) if(data[key]!==undefined) settings[key]=key==='autoReservePercent'?Math.max(0,Math.min(100,Number(data[key])||0)):data[key];
       if(data.imageAccountId!==undefined){const id=String(data.imageAccountId||'');if(id&&!accounts.some(a=>a.id===id))return respond(res,400,{error:'Không tìm thấy tài khoản dành cho ảnh.'});settings.imageAccountId=id;}
@@ -633,7 +635,7 @@ const server=http.createServer(async(req,res)=>{
         const decoded=Buffer.from(match[2],'base64');if(decoded.length>6*1024*1024)return respond(res,400,{error:'Mỗi ảnh tham chiếu tối đa 6 MB.'});if(decoded.toString('base64')!==match[2])return respond(res,400,{error:'Dữ liệu ảnh tham chiếu không hợp lệ.'});
       }
       const inferredType=types.find(type=>type==='Ảnh'||type==='Video')||'Ảnh';
-      const workers=Math.max(1,Math.min(5,Number(data.workers)|| (inferredType==='Video'?settings.videoWorkers:settings.imageWorkers)));
+      const workers=Math.max(1,Math.min(MAX_WORKERS,Number(data.workers)|| (inferredType==='Video'?settings.videoWorkers:settings.imageWorkers)));
       const accountId=accounts.some(a=>a.id===data.accountId&&a.enabled)?data.accountId:(accounts.find(a=>a.primary&&a.enabled)||accounts.find(a=>a.enabled))?.id;
       if(!accountId)return respond(res,400,{error:'Không có tài khoản Muse đang bật.'});
       const batch={id:crypto.randomUUID(),status:'Đang chờ',workers,accountId,strictAccount:Boolean(data.strictAccount),createdAt:new Date().toISOString(),jobs:valid.map(item=>{const id=crypto.randomUUID(),type=detect(item.prompt),job={id,prompt:item.prompt,type,status:'Trong hàng đợi'};if(item.referenceImage){const ext={'image/png':'.png','image/jpeg':'.jpg','image/webp':'.webp'}[item.referenceImage.mimeType];fs.mkdirSync(REFERENCE_DIR,{recursive:true});job.referenceImagePath=path.join(REFERENCE_DIR,id+ext);job.referenceName=path.basename(String(item.referenceImage.name||'anh-tham-chieu'+ext)).slice(0,180);fs.writeFileSync(job.referenceImagePath,Buffer.from(String(item.referenceImage.data).split(',')[1],'base64'))}return job})};
