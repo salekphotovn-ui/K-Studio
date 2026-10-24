@@ -265,6 +265,10 @@ async function connectMuse(accountId='default', hidden=false) {
         args: ['--window-size=800,600', ...(hidden ? ['--start-minimized'] : [])],
         acceptDownloads: true,
       });
+      // Startup quota/session reads should stay out of sight for saved sessions.
+      // Begin hiding as soon as Chrome exists instead of waiting for Muse to load
+      // and quota parsing to finish, which can flash a minimized window on screen.
+      if (hidden) startMuseWindowWatcher(profile);
       const launchedContext = museContext;
       launchedContext.on('close', () => {
         if (museContext === launchedContext) {
