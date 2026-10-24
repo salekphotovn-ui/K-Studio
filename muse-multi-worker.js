@@ -145,14 +145,14 @@ async function run(payload) {
     const pages = [];
     for (let index = 0; index < tasks.length; index++) pages.push(index === 0 && context.pages()[0] ? context.pages()[0] : await context.newPage());
     const results = await Promise.all(tasks.map(async (task, index) => {
-      try { const result = await runTask(pages[index], { ...task, tempDir: payload.tempDir }); process.send?.({ kind: 'job', result }); return result; }
+      try { const result = await runTask(pages[index], { ...task, root: payload.root, profileDir: payload.profileDir, tempDir: payload.tempDir }); process.send?.({ kind: 'job', result }); return result; }
       catch (error) { const result = { jobId: task.jobId, lane: task.lane, ok: false, error: error.message, code: error.code || 'KSTUDIO_ERROR', chatUrl: pages[index]?.url() }; process.send?.({ kind: 'job', result }); return result; }
     }));
     return { ok: true, results };
   } finally { await context.close().catch(() => {}); }
 }
 
-module.exports = { responseForPrompt, runTask, saveEmbeddedVideo };
+module.exports = { responseForPrompt, runTask, saveEmbeddedVideo, run };
 
 if (require.main === module) {
   process.on('message', async payload => {
