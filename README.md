@@ -21,7 +21,7 @@ K Studio dùng Main chat của mỗi tài khoản và chỉ giao một tác vụ
 
 Để dọn side chat trên một máy, đợi hàng đợi kết thúc, mở **Tài khoản → Xóa chat phụ**, rồi xác nhận. K Studio xử lý lần lượt các tài khoản đã đăng nhập trên chính máy đó và giữ Main chat. Chat phụ bị xóa vĩnh viễn trên Muse; tài khoản chưa đăng nhập được báo lỗi để đăng nhập rồi chạy lại.
 
-Mỗi máy trong team có API cục bộ với cổng và khóa riêng. Xem key trong **Cài đặt → API cục bộ cho AI khác** và đọc [LOCAL_API.md](LOCAL_API.md) để gửi lô từ script trên chính máy cài K Studio.
+Mỗi máy trong team có API cục bộ với cổng và khóa riêng. Xem key trong **Cài đặt → API cục bộ cho AI khác**. Đưa cho AI trên máy đó file [KSTUDIO_API_FOR_AI.md](KSTUDIO_API_FOR_AI.md) để đọc quy trình gọi lô; [LOCAL_API.md](LOCAL_API.md) mô tả thêm các endpoint.
 
 ## Dữ liệu người dùng
 

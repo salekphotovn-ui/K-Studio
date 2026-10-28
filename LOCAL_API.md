@@ -1,5 +1,7 @@
 # API cục bộ của K Studio
 
+Tài liệu này đi cùng K Studio v0.3.63 trở lên. AI trên từng máy nên đọc `%LOCALAPPDATA%\Programs\K Studio\KSTUDIO_API_FOR_AI.md` trước khi tạo lô; file này được thay cùng bộ cài khi cập nhật từ xa. Kiểm tra `GET /api/health` để biết phiên bản và công suất thật của chính máy đó.
+
 Mỗi máy trong team cài K Studio và tự đăng nhập tài khoản Muse của mình. Chương trình/script trên **chính máy đó** gọi API ở `http://127.0.0.1:4174`. Mỗi máy có hàng đợi, tài khoản và thư mục kết quả riêng. Không cần VPN hoặc mở Windows Firewall.
 
 Giao diện K Studio vẫn ở `http://127.0.0.1:4173`. API cục bộ chỉ nghe ở `127.0.0.1`, dùng cổng và khóa riêng; không cho máy khác trong mạng gọi trực tiếp.
@@ -30,12 +32,10 @@ Trong **Cài đặt → API cục bộ cho AI khác**, bấm **Sao chép** để
   "job_id": "du-an-a-001",
   "type": "video",
   "account": "auto",
-  "workers": 3,
   "aspect_ratio": "16:9",
   "output_dir": "D:/Du an A/videos",
   "skip_existing": true,
   "max_retries": 1,
-  "stop_if_quota_used_over_pct": 90,
   "items": [
     { "id": "canh-01", "prompt": "Animate this image with a slow camera push-in...", "image": "D:/Du an A/images/canh-01.webp" },
     { "id": "canh-02", "prompt": "Animate this image with a gentle pan...", "image": "D:/Du an A/images/canh-02.png" }
@@ -43,9 +43,9 @@ Trong **Cài đặt → API cục bộ cho AI khác**, bấm **Sao chép** để
 }
 ```
 
-`type` là `image` hoặc `video`. `job_id` và `items[].id` chỉ dùng chữ Latin, số, `-`, `_`; mỗi item cần một ID duy nhất. Tối đa 300 item và 10 ảnh tham chiếu mỗi lô, ảnh tối đa 6 MB. Nếu không có `output_dir`, kết quả vào thư mục output K Studio: `videos/<job_id>` hoặc `images/<job_id>`. Nếu có, đó phải là đường dẫn tuyệt đối trên **máy này**; kết quả nằm trực tiếp trong thư mục đã chỉ định. API không ghi đè file cũ.
+`type` là `image` hoặc `video`. `job_id` và `items[].id` chỉ dùng chữ Latin, số, `-`, `_`; mỗi item cần một ID duy nhất. Tối đa 300 item và 300 đường dẫn ảnh tham chiếu `image` mỗi lô; nếu dùng `image_data` base64 thì tối đa 10 ảnh, mỗi ảnh tối đa 6 MB. Nếu không có `output_dir`, kết quả vào thư mục output K Studio: `videos/<job_id>` hoặc `images/<job_id>`. Nếu có, đó phải là đường dẫn tuyệt đối trên **máy này**; kết quả nằm trực tiếp trong thư mục đã chỉ định. API không ghi đè file cũ.
 
-Mỗi tài khoản dùng Main chat và nhận một tác vụ tại một thời điểm. `workers` nhận số nguyên từ `1` đến số tài khoản đã đăng nhập, đang bật và chưa bị Muse chặn; nếu bỏ qua, API dùng toàn bộ công suất sẵn sàng (hoặc mức đã đặt trong Cài đặt). Công suất tự tăng theo số tài khoản: 5 tài khoản có thể chạy 5 luồng, 10 tài khoản 10 luồng. `GET /api/health` trả `capabilities.max_workers`, `workers_per_account: 1` và số tài khoản bật/sẵn sàng. Nếu Muse từ chối do hạn mức, phần việc chưa gửi mới tiếp tục trên tài khoản kế tiếp.
+Mỗi tài khoản dùng Main chat và nhận một tác vụ tại một thời điểm. Có thể bỏ `workers` để K Studio chọn công suất theo tài khoản sẵn sàng và Cài đặt. Nếu đặt tường minh, dùng `capabilities.max_image_workers` cho ảnh hoặc `capabilities.max_video_workers` cho video từ `GET /api/health`; không dùng số cố định cho mọi máy. Công suất tăng theo số tài khoản: 5 tài khoản phù hợp có thể chạy 5 luồng. `GET /api/health` trả `workers_per_account: 1`; giới hạn video có thể thấp hơn ảnh nếu đã loại tài khoản chuyên tạo ảnh. Nếu Muse từ chối do hạn mức, phần việc chưa gửi mới tiếp tục trên tài khoản kế tiếp.
 
 Ảnh tham chiếu có thể gửi qua đường dẫn `image` trên cùng máy, hoặc qua `image_data` dạng `data:image/webp;base64,...`. Mỗi item video nhận tối đa một ảnh. Với tác vụ ảnh, bỏ cả hai trường. K Studio chép ảnh vào vùng dữ liệu riêng trước khi xếp hàng, nên file gốc có thể tiếp tục được dùng.
 
@@ -65,9 +65,9 @@ Kết quả được chép vào `<output_dir>/<id>.<định dạng gốc>` qua f
 
 | Phương thức | Đường dẫn | Công dụng |
 | --- | --- | --- |
-| `GET` | `/api/health` | Phiên bản và số lô đang chạy |
+| `GET` | `/api/health` | Phiên bản, tài khoản sẵn sàng và giới hạn luồng ảnh/video |
 | `GET` | `/api/jobs/<job_id>` | Trạng thái lô và từng item |
-| `GET` | `/api/jobs/<job_id>?wait=1800` | Chờ tối đa 1.800 giây rồi trả trạng thái |
+| `GET` | `/api/jobs/<job_id>?wait=300` | Chờ tối đa 300 giây rồi trả trạng thái; có thể đặt `wait` tối đa 1.800 giây nếu client cho phép |
 | `GET` | `/api/jobs/<job_id>/files/<id>` | Tải file của item đã hoàn tất |
 | `POST` | `/api/jobs/<job_id>/retry` | Thử lại item lỗi; có thể gửi prompt đã chỉnh bằng `items: [{"id":"canh-01","prompt":"prompt mới"}]` |
 | `POST` | `/api/jobs/<job_id>/resume` | Kiểm tra lại hạn mức và tiếp tục item đang tạm dừng |
@@ -94,7 +94,7 @@ Ví dụ:
 
 Gửi `{"ids":["v04"]}` để thử lại prompt cũ cho một item; gửi `{}` để thử lại tất cả item lỗi bằng prompt hiện có. Có thể kết hợp `ids` và `items`; prompt mới chỉ áp dụng cho các ID được nêu. API chỉ nhận cập nhật cho item đang lỗi và từ chối item đang chạy/đã hoàn tất. Nếu lỗi chỉ rõ prompt không phù hợp, AI client nên sửa prompt; nếu lỗi là timeout hoặc Muse không mở được chat, nên xử lý kết nối trước thay vì đổi nội dung prompt.
 
-Trường `file` là đường dẫn API để tải; file cũng nằm ở `output_dir` trên máy này.
+Trường `file` là đường dẫn API để tải, không phải đường dẫn ổ đĩa. File thực tế nằm ở `output_dir/<items[].id>.<định dạng gốc>` trên máy này; xác định đúng đuôi PNG/JPG/WebP trước khi dùng làm ảnh tham chiếu cho video.
 
 Nếu nhận `401`, key mà client gửi đã khác key K Studio đang dùng. Sao chép lại key hiện tại từ **Cài đặt → API cục bộ cho AI khác** rồi cập nhật cấu hình client. Key trong một bản sao cũ của `%LOCALAPPDATA%` hoặc môi trường chạy tách biệt có thể không phải key của tiến trình K Studio hiện tại; không cần tạo key mới chỉ để xử lý `401`.
 

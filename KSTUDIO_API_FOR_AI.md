@@ -1,6 +1,6 @@
 # Hướng dẫn AI sử dụng K Studio API
 
-Tài liệu này dành cho Claude, Codex hoặc một AI có khả năng gọi HTTP và đọc tệp trên máy đang cài K Studio.
+Tài liệu này dành cho Claude, Codex hoặc một AI có khả năng gọi HTTP và đọc tệp trên máy đang cài K Studio. Bản tài liệu đi cùng K Studio v0.3.63 trở lên, tại `%LOCALAPPDATA%\Programs\K Studio\KSTUDIO_API_FOR_AI.md` trên từng máy Windows.
 
 ## 1. Kết nối
 
@@ -30,7 +30,8 @@ Quy tắc bảo mật:
 - Mỗi tài khoản chạy tối đa `1` tác vụ cùng lúc trong Main chat Muse.
 - Công suất tối đa bằng số tài khoản Muse sẵn sàng; 5 tài khoản đạt 5 luồng, 10 tài khoản đạt 10.
 - K Studio chia tác vụ cho các tài khoản sẵn sàng và xử lý tuần tự trên từng tài khoản.
-- Đọc `capabilities.max_workers` từ `/api/health` trước khi gửi; đặt trường `workers` bằng giới hạn đó để dùng toàn bộ công suất hiện có.
+- Đọc `/api/health` trước khi gửi. Bỏ trường `workers` để K Studio tự chọn công suất, hoặc dùng `capabilities.max_image_workers` cho lô ảnh và `capabilities.max_video_workers` cho lô video. Không ghi cứng `workers: 10`.
+- Nếu máy chọn một tài khoản chỉ để tạo ảnh và loại tài khoản đó khỏi video, giới hạn video sẽ thấp hơn giới hạn ảnh. Mỗi máy có số tài khoản và giới hạn riêng.
 - Với lô hỗn hợp, tạo ảnh trước rồi mới tạo video.
 - Dùng `"account": "auto"` để K Studio tự phân phối tác vụ.
 - Không đặt `stop_if_quota_used_over_pct` trừ khi người dùng yêu cầu.
@@ -51,7 +52,7 @@ $headers = @{ 'X-Api-Key' = $config.apiKey }
 Invoke-RestMethod -Uri 'http://127.0.0.1:4174/api/health' -Headers $headers
 ```
 
-Chỉ gửi lô khi `ok` là `true`. Trường `default_workers` cho biết số luồng mặc định dành cho ảnh và video; `capabilities.max_workers` là số tài khoản đang bật, sẵn sàng và chưa bị chặn, còn `workers_per_account` là 1. Luồng thực tế không vượt quá công suất tài khoản và số item trong lô.
+Chỉ gửi lô khi `ok` là `true` và `capabilities.workers_per_account` là `1`. Trường `default_workers.image` và `default_workers.video` cho biết số luồng mặc định; `capabilities.max_image_workers` và `capabilities.max_video_workers` là mức tối đa cho từng loại. `capabilities.max_workers` là tổng số tài khoản sẵn sàng, có thể lớn hơn mức video khi tài khoản ảnh bị loại khỏi video. Luồng thực tế không vượt quá công suất tài khoản và số item trong lô.
 
 ## 4. Gửi lô tạo ảnh
 
@@ -68,7 +69,6 @@ Mẫu request:
   "job_id": "project-images-001",
   "type": "image",
   "account": "auto",
-  "workers": 10,
   "output_dir": "D:/PROJECT/output/images",
   "skip_existing": true,
   "max_retries": 1,
@@ -88,11 +88,11 @@ Mẫu request:
 K Studio lưu kết quả theo `items[].id`, ví dụ:
 
 ```text
-D:/PROJECT/output/images/scene_001.webp
-D:/PROJECT/output/images/scene_002.webp
+D:/PROJECT/output/images/scene_001.<đuôi ảnh thực tế>
+D:/PROJECT/output/images/scene_002.<đuôi ảnh thực tế>
 ```
 
-Phần mở rộng thực tế có thể là `.webp`, `.png`, `.jpg` hoặc `.jpeg`.
+Phần mở rộng thực tế có thể là `.webp`, `.png`, `.jpg` hoặc `.jpeg`. `items[].file` trong phản hồi là **đường dẫn API để tải file**, không phải đường dẫn ổ đĩa. Trước khi gửi video, tìm đúng file `<output_dir>/<id>` với đuôi ảnh thực tế và kiểm tra file tồn tại, dung lượng lớn hơn 0.
 
 ## 5. Gửi lô tạo video từ ảnh
 
@@ -103,7 +103,6 @@ Mỗi item phải có đúng một ảnh và một prompt tương ứng. Ảnh 1
   "job_id": "project-videos-001",
   "type": "video",
   "account": "auto",
-  "workers": 10,
   "aspect_ratio": "16:9",
   "output_dir": "D:/PROJECT/output/videos",
   "skip_existing": true,
@@ -117,7 +116,7 @@ Mỗi item phải có đúng một ảnh và một prompt tương ứng. Ảnh 1
     {
       "id": "scene_002",
       "prompt": "Animate the fox gently turning its head while leaves drift. Preserve its appearance and the original scene. Duration 5 seconds.",
-      "image": "D:/PROJECT/output/images/scene_002.webp"
+      "image": "D:/PROJECT/output/images/scene_002.png"
     }
   ]
 }
@@ -126,6 +125,7 @@ Mỗi item phải có đúng một ảnh và một prompt tương ứng. Ảnh 1
 Quy tắc ảnh tham chiếu:
 
 - `image` phải là đường dẫn tuyệt đối trên máy K Studio.
+- Hai đường dẫn ảnh ở ví dụ chỉ minh họa hai định dạng có thể gặp; lấy tên file thực tế của lô ảnh trên máy, không đoán đuôi file.
 - Chấp nhận PNG, JPG, JPEG và WebP.
 - Mỗi ảnh tối đa 6 MB.
 - Một lô hỗ trợ tối đa 300 đường dẫn ảnh.
@@ -146,16 +146,16 @@ Quy tắc ảnh tham chiếu:
 Sau khi tạo lô, dùng long polling:
 
 ```http
-GET /api/jobs/{job_id}?wait=1800&full=1
+GET /api/jobs/{job_id}?wait=300
 ```
 
 Ví dụ:
 
 ```http
-GET /api/jobs/project-videos-001?wait=1800&full=1
+GET /api/jobs/project-videos-001?wait=300
 ```
 
-Nếu trạng thái vẫn là `queued` hoặc `running`, tiếp tục gọi lại endpoint này. Không hỏi trạng thái liên tục mỗi vài giây.
+Nếu trạng thái vẫn là `queued` hoặc `running`, tiếp tục gọi lại endpoint này. `wait` tính bằng giây, tối đa 1800; dùng giá trị phù hợp với thời gian chờ HTTP của client. Không hỏi trạng thái liên tục mỗi vài giây. Tham số `full` không cần thiết vì phản hồi đã gồm trạng thái từng item.
 
 Các trạng thái chính:
 
@@ -208,10 +208,10 @@ Sửa prompt rồi thử lại:
 Sau khi gọi retry, tiếp tục chờ bằng:
 
 ```http
-GET /api/jobs/{job_id}?wait=1800&full=1
+GET /api/jobs/{job_id}?wait=300
 ```
 
-Không tạo một lô mới chỉ để thử lại item lỗi của lô cũ.
+Nếu lỗi là timeout sau khi prompt đã gửi, kiểm tra Main chat Muse của tài khoản đó trước khi retry để tránh tạo trùng và tốn token. Không tạo một lô mới chỉ để thử lại item lỗi của lô cũ.
 
 ## 9. Hủy lô
 
@@ -224,13 +224,13 @@ Tác vụ đang chạy có thể hoàn thành; các tác vụ chưa chạy sẽ 
 ## 10. Quy trình chuẩn cho dự án ảnh và video
 
 1. Gọi `GET /api/health`.
-2. Gửi toàn bộ prompt ảnh bằng một `POST /api/jobs`, `type: image`, `workers: 10`.
-3. Chờ lô ảnh bằng `GET /api/jobs/{job_id}?wait=1800&full=1`.
+2. Gửi toàn bộ prompt ảnh bằng một `POST /api/jobs`, `type: image`; bỏ `workers` để K Studio tự chọn, hoặc dùng `capabilities.max_image_workers`.
+3. Chờ lô ảnh bằng `GET /api/jobs/{job_id}?wait=300` và lặp lại khi còn chạy.
 4. Thử lại các ảnh lỗi trong cùng lô.
-5. Xác định chính xác file ảnh của từng `items[].id`.
-6. Gửi lô video bằng `POST /api/jobs`, `type: video`, `workers: 10`; mỗi item ghép đúng đường dẫn ảnh và prompt.
+5. Xác định chính xác file ảnh thực tế của từng `items[].id` trong `output_dir`; chỉ dùng ảnh đã tạo thành công hoặc đã có sẵn.
+6. Gửi lô video bằng `POST /api/jobs`, `type: video`; bỏ `workers` hoặc dùng `capabilities.max_video_workers`. Mỗi item ghép đúng đường dẫn ảnh và prompt.
 7. Chờ lô video hoàn tất.
-8. Đọc `error` và `error_code` của từng video lỗi, sửa prompt khi cần rồi gọi retry.
+8. Đọc `error` và `error_code` của từng video lỗi. Kiểm tra Main chat nếu bị timeout; sửa prompt khi lỗi do nội dung rồi gọi retry.
 9. Báo cho người dùng số lượng thành công, số lượng lỗi và đường dẫn `output_dir`.
 
 ## 11. Mẫu chỉ dẫn ngắn cho AI
@@ -240,9 +240,9 @@ Dùng K Studio API tại http://127.0.0.1:4174.
 Đọc key từ %LOCALAPPDATA%\K Studio\local-api.json và gửi trong header X-Api-Key; không in key ra câu trả lời.
 Kiểm tra GET /api/health trước.
 Gửi toàn bộ cảnh theo lô qua POST /api/jobs.
-Dùng `account:auto`, `max_retries:1`, không đặt ngưỡng hạn mức; đặt `workers` theo `capabilities.max_workers` từ `/api/health` (số tài khoản đang sẵn sàng).
+Dùng `account:auto`, `max_retries:1`, không đặt ngưỡng hạn mức và bỏ `workers` để K Studio tự chọn. Nếu cần đặt tường minh, đọc `capabilities.max_image_workers` hoặc `capabilities.max_video_workers` từ `/api/health` theo loại lô. Mỗi tài khoản chỉ chạy 1 tác vụ trong Main chat.
 Video phải ghép từng items[].image với đúng items[].prompt.
-Chờ bằng GET /api/jobs/{job_id}?wait=1800&full=1.
+Chờ bằng GET /api/jobs/{job_id}?wait=300; gọi lại nếu lô còn chạy.
 Chỉ retry item failed; có thể sửa prompt bằng trường items trong request retry.
 Không tạo trùng item đã done và không đổi API key.
 ```
