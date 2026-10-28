@@ -48,7 +48,7 @@ function finalizeTeamOutput(job) {
 }
 
 function startLocalApi(deps) {
-  const { dataRoot, outputRootDir, referenceDir, batches, accounts, queueBatch, persistHistory, runningBatches, accountReady, defaultQuotaThreshold, defaultWorkerCount } = deps;
+  const { dataRoot, outputRootDir, referenceDir, batches, accounts, queueBatch, persistHistory, runningBatches, accountReady, defaultQuotaThreshold, defaultWorkerCount, maxWorkerCount } = deps;
   const configPath = path.join(dataRoot, 'local-api.json');
   let config;
   if (fs.existsSync(configPath)) config = JSON.parse(fs.readFileSync(configPath, 'utf8'));
@@ -162,8 +162,8 @@ function startLocalApi(deps) {
         const quotaBlocked = Number.isFinite(blockedAt) && Date.now() - blockedAt < 6 * 60 * 60 * 1000;
         return accountReady(account) && !quotaBlocked;
       });
-      const maxWorkers = Math.max(1, ready.length * 2);
-      return send(res, 200, { ok: true, version: require('./package.json').version, quota_threshold_pct: defaultQuotaThreshold(), default_workers: { image: Math.min(maxWorkers, defaultWorkerCount('Ảnh')), video: Math.min(maxWorkers, defaultWorkerCount('Video')) }, capabilities: { max_workers: maxWorkers, workers_per_account: 2, scheduling: 'one-per-account-then-second-chat', enabled_accounts: enabled.length, ready_accounts: ready.length, video_reference_image: true, video_result_download: true }, accounts: enabled.map(account => ({ name: account.name, ready: accountReady(account), quota_blocked: Boolean(account.quotaBlockedAt), estimated_next_image_pct: Math.max(1, Number(account.imageCostBufferPct) || 0), estimated_next_video_pct: Math.max(4, Number(account.videoCostBufferPct) || 0), ...quotaSnapshot(account) })), running_jobs: runningBatches.size });
+      const maxWorkers = Math.max(1, ready.length);
+      return send(res, 200, { ok: true, version: require('./package.json').version, quota_threshold_pct: defaultQuotaThreshold(), default_workers: { image: Math.min(maxWorkers, defaultWorkerCount('Ảnh')), video: Math.min(maxWorkers, defaultWorkerCount('Video')) }, capabilities: { max_workers: maxWorkers, max_image_workers: maxWorkerCount('Ảnh'), max_video_workers: maxWorkerCount('Video'), workers_per_account: 1, scheduling: 'one-per-account-main-chat', enabled_accounts: enabled.length, ready_accounts: ready.length, video_reference_image: true, video_result_download: true }, accounts: enabled.map(account => ({ name: account.name, ready: accountReady(account), quota_blocked: Boolean(account.quotaBlockedAt), estimated_next_image_pct: Math.max(1, Number(account.imageCostBufferPct) || 0), estimated_next_video_pct: Math.max(4, Number(account.videoCostBufferPct) || 0), ...quotaSnapshot(account) })), running_jobs: runningBatches.size });
     }
     if (req.method === 'POST' && url.pathname === '/api/jobs') {
       try {
@@ -173,10 +173,7 @@ function startLocalApi(deps) {
         const type = data.type === 'video' ? 'Video' : data.type === 'image' ? 'Ảnh' : null;
         if (!type) return send(res, 400, { error: 'type phải là image hoặc video.' });
         const requestedWorkers = data.workers == null ? null : Number(data.workers);
-        const workerMaximum = Math.max(1, accounts.filter(account => {
-          const blockedAt = Date.parse(account.quotaBlockedAt || '');
-          return account.enabled && accountReady(account) && !(Number.isFinite(blockedAt) && Date.now() - blockedAt < 6 * 60 * 60 * 1000);
-        }).length * 2);
+        const workerMaximum = maxWorkerCount(type);
         if (requestedWorkers != null && (!Number.isInteger(requestedWorkers) || requestedWorkers < 1 || requestedWorkers > workerMaximum)) return send(res, 422, { error: `workers của ${type === 'Video' ? 'video' : 'ảnh'} phải là số nguyên từ 1 đến ${workerMaximum}.` });
         if (!Array.isArray(data.items) || !data.items.length || data.items.length > 300) return send(res, 400, { error: 'Mỗi lô cần 1–300 item.' });
         if (data.items.filter(item => item.image_data != null).length > 10) return send(res, 400, { error: 'Tối đa 10 ảnh base64 mỗi lô; dùng đường dẫn image trên máy cho lô lớn.' });

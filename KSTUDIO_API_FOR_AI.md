@@ -27,9 +27,9 @@ Quy tắc bảo mật:
 
 ## 2. Cấu hình xử lý
 
-- Mỗi tài khoản chạy tối đa `2` tác vụ cùng lúc trên hai chat Muse riêng.
-- Công suất tối đa bằng `2 × số tài khoản Muse sẵn sàng`; 5 tài khoản đạt 10 luồng, 10 tài khoản đạt 20.
-- K Studio chia tác vụ đầu cho từng tài khoản trước khi dùng chat thứ hai.
+- Mỗi tài khoản chạy tối đa `1` tác vụ cùng lúc trong Main chat Muse.
+- Công suất tối đa bằng số tài khoản Muse sẵn sàng; 5 tài khoản đạt 5 luồng, 10 tài khoản đạt 10.
+- K Studio chia tác vụ cho các tài khoản sẵn sàng và xử lý tuần tự trên từng tài khoản.
 - Đọc `capabilities.max_workers` từ `/api/health` trước khi gửi; đặt trường `workers` bằng giới hạn đó để dùng toàn bộ công suất hiện có.
 - Với lô hỗn hợp, tạo ảnh trước rồi mới tạo video.
 - Dùng `"account": "auto"` để K Studio tự phân phối tác vụ.
@@ -51,7 +51,7 @@ $headers = @{ 'X-Api-Key' = $config.apiKey }
 Invoke-RestMethod -Uri 'http://127.0.0.1:4174/api/health' -Headers $headers
 ```
 
-Chỉ gửi lô khi `ok` là `true`. Trường `default_workers` cho biết số luồng mặc định dành cho ảnh và video; `capabilities.max_workers` là hai lần số tài khoản đang bật, sẵn sàng và chưa bị chặn, còn `workers_per_account` là 2. Luồng thực tế không vượt quá công suất tài khoản và số item trong lô. K Studio chia một tác vụ cho từng tài khoản trước khi dùng chat thứ hai của mỗi tài khoản.
+Chỉ gửi lô khi `ok` là `true`. Trường `default_workers` cho biết số luồng mặc định dành cho ảnh và video; `capabilities.max_workers` là số tài khoản đang bật, sẵn sàng và chưa bị chặn, còn `workers_per_account` là 1. Luồng thực tế không vượt quá công suất tài khoản và số item trong lô.
 
 ## 4. Gửi lô tạo ảnh
 
@@ -240,7 +240,7 @@ Dùng K Studio API tại http://127.0.0.1:4174.
 Đọc key từ %LOCALAPPDATA%\K Studio\local-api.json và gửi trong header X-Api-Key; không in key ra câu trả lời.
 Kiểm tra GET /api/health trước.
 Gửi toàn bộ cảnh theo lô qua POST /api/jobs.
-Dùng `account:auto`, `max_retries:1`, không đặt ngưỡng hạn mức; đặt `workers` theo `capabilities.max_workers` từ `/api/health` (hai lần số tài khoản đang sẵn sàng).
+Dùng `account:auto`, `max_retries:1`, không đặt ngưỡng hạn mức; đặt `workers` theo `capabilities.max_workers` từ `/api/health` (số tài khoản đang sẵn sàng).
 Video phải ghép từng items[].image với đúng items[].prompt.
 Chờ bằng GET /api/jobs/{job_id}?wait=1800&full=1.
 Chỉ retry item failed; có thể sửa prompt bằng trường items trong request retry.

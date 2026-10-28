@@ -87,7 +87,7 @@ async function run(payload) {
   });
   try {
     const page = context.pages()[0] || await context.newPage();
-    await page.goto(payload.chatUrl || 'https://muse.ai/thread/new', { waitUntil: 'domcontentloaded' });
+    await page.goto(payload.chatUrl || 'https://muse.ai/', { waitUntil: 'domcontentloaded' });
     const textbox = page.getByRole('textbox', { name: /Message/i }).first();
     try { await textbox.waitFor({ state: 'visible', timeout: 30000 }); }
     catch { const error = new Error('Phiên Muse cần đăng nhập lại.'); error.code = 'MUSE_LOGIN_REQUIRED'; throw error; }
