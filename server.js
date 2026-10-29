@@ -657,6 +657,24 @@ const server=http.createServer(async(req,res)=>{
     const files=[];const visit=current=>{for(const item of fs.readdirSync(current,{withFileTypes:true})){const full=path.join(current,item.name);if(item.isDirectory())visit(full);else if(item.isFile()){const stat=fs.statSync(full),ext=path.extname(item.name).toLowerCase(),relativePath=path.relative(dir,full),url='/api/output/'+relativePath.split(path.sep).map(encodeURIComponent).join('/');files.push({name:item.name,relativePath,path:full,type:['.mp4','.webm','.mov','.mkv'].includes(ext)?'Video':'Ảnh',size:stat.size,modifiedAt:stat.mtime.toISOString(),url})}}};visit(dir);files.sort((a,b)=>b.modifiedAt.localeCompare(a.modifiedAt));
     return respond(res,200,{directory:dir,files});
   }
+  if(req.method==='POST' && url.pathname==='/api/library/delete') {
+    try {
+      const data=await bodyJson(req),paths=Array.isArray(data.paths)?Array.from(new Set(data.paths.map(String))):[];
+      if(!paths.length)return respond(res,400,{error:'Chưa chọn file để xóa.'});
+      if(paths.length>10000)return respond(res,400,{error:'Chỉ xóa tối đa 10000 file mỗi lần.'});
+      const targets=paths.map(relativePath=>({relativePath,file:resolveOutputFile(relativePath)}));
+      if(targets.some(({file})=>!file))return respond(res,400,{error:'Đường dẫn file không hợp lệ.'});
+      let freedBytes=0;const deleted=[];
+      for(const {relativePath,file} of targets){
+        if(!fs.existsSync(file)||!fs.statSync(file).isFile())continue;
+        if(!['.png','.jpg','.jpeg','.webp','.gif','.bmp','.mp4','.webm','.mov','.mkv'].includes(path.extname(file).toLowerCase()))continue;
+        freedBytes+=fs.statSync(file).size;fs.unlinkSync(file);deleted.push(relativePath);
+        for(const batch of batches.values())for(const job of batch.jobs)if(job.outputPath&&path.resolve(job.outputPath)===file)job.outputPath=null;
+      }
+      if(deleted.length)persistHistory();
+      return respond(res,200,{deleted,freedBytes});
+    } catch(e) { return respond(res,500,{error:e.message}); }
+  }
   if(req.method==='POST' && url.pathname==='/api/choose-output') {
     const script = "Add-Type -AssemblyName System.Windows.Forms; $d=New-Object System.Windows.Forms.FolderBrowserDialog; $d.Description='Chọn thư mục lưu kết quả Muse Studio'; if($d.ShowDialog() -eq [System.Windows.Forms.DialogResult]::OK){[Console]::Write($d.SelectedPath)}";
     const result=spawnSync('powershell.exe',['-NoProfile','-STA','-Command',script],{encoding:'utf8',windowsHide:false,timeout:120000});
