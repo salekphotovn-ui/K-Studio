@@ -197,7 +197,7 @@ function scheduleResume(){
 function queueBatch(batch){
   if(scheduledBatches.has(batch.id)||runningBatches.has(batch.id))return;
   scheduledBatches.add(batch.id);
-  museQueue=museQueue.then(async()=>{scheduledBatches.delete(batch.id);runningBatches.add(batch.id);try{await runMuseBatch(batch)}finally{runningBatches.delete(batch.id);scheduleResume()}}).catch(e=>{batch.status='Lỗi kết nối Muse';batch.error=e.message;persistHistory()});
+  museQueue=museQueue.then(async()=>{scheduledBatches.delete(batch.id);runningBatches.add(batch.id);try{await runMuseBatch(batch)}finally{runningBatches.delete(batch.id);if(batch.resumeAfterAccountRemoval){delete batch.resumeAfterAccountRemoval;setImmediate(resumePausedBatches)}scheduleResume()}}).catch(e=>{batch.status='Lỗi kết nối Muse';batch.error=e.message;persistHistory()});
 }
 function resumePausedBatches(){for(const batch of batches.values())if(batch.status.startsWith('Tạm dừng')&&batch.jobs.some(j=>j.status==='Trong hàng đợi'))queueBatch(batch);scheduleResume()}
 function museContextIsAlive() {
@@ -473,6 +473,13 @@ async function downloadLatestVideo(page, prompt, timeoutMs = 15000) {
 }
 const activeAccountJobs=new Map();
 const activeTaskChildren=new Map();
+function cancelActiveTask(job){
+  job.cancelRequested=true;
+  const child=activeTaskChildren.get(job.id);
+  if(!child)return;
+  if(child.connected)child.send({kind:'cancel'},()=>{});else child.kill();
+  setTimeout(()=>{if(activeTaskChildren.get(job.id)===child)child.kill()},5000).unref();
+}
 const activeWorkerChildren=new Set();
 function cleanSideChatsForAccount(account){
   return new Promise(resolve=>{
@@ -644,7 +651,35 @@ const server=http.createServer(async(req,res)=>{
       try{const data=await bodyJson(req);if(data.name!==undefined){const name=String(data.name).trim();if(!name)return respond(res,400,{error:'Tên tài khoản không được để trống.'});account.name=name}if(data.enabled!==undefined){if(!data.enabled&&runningBatches.size&&museAccountId===id)return respond(res,409,{error:'Tài khoản còn tác vụ đang chạy.'});account.enabled=Boolean(data.enabled);if(!account.enabled&&accounts.filter(a=>a.enabled).length===0)return respond(res,400,{error:'Cần giữ ít nhất một tài khoản đang bật.'});if(!account.enabled&&account.primary){account.primary=false;const next=accounts.find(a=>a.enabled);if(next)next.primary=true}if(!account.enabled&&museAccountId===id&&museContext){await museContext.close().catch(()=>{});museContext=null;musePage=null;museState='disconnected'}}if(data.primary){if(!account.enabled)return respond(res,400,{error:'Hãy bật tài khoản trước.'});for(const a of accounts)a.primary=false;account.primary=true;const index=accounts.indexOf(account);if(index>0){accounts.splice(index,1);accounts.unshift(account)}}if(data.move){const from=accounts.indexOf(account),to=Math.max(0,Math.min(accounts.length-1,from+Number(data.move)));accounts.splice(from,1);accounts.splice(to,0,account)}syncAutomaticWorkerCapacity();persistAccounts();if(data.enabled)resumePausedBatches();return respond(res,200,{id:account.id,name:account.name,enabled:account.enabled,primary:account.primary,open:museAccountId===id&&!!museContext,session:museAccountId===id?museState:'Chưa mở'});}catch(e){return respond(res,400,{error:e.message});}
   }
   if(req.method==='DELETE' && url.pathname.startsWith('/api/accounts/')) {
-    const id=url.pathname.split('/')[3];if(Array.from(batches.values()).some(b=>b.accountId===id&&!['Hoàn tất','Hoàn tất, có lỗi','Lỗi kết nối Muse','Chờ đăng nhập Muse','Lỗi'].includes(b.status)))return respond(res,409,{error:'Tài khoản còn tác vụ đang chạy.'});if(accounts.length<=1)return respond(res,400,{error:'Phải giữ lại ít nhất một tài khoản.'});const index=accounts.findIndex(a=>a.id===id);if(index<0)return respond(res,404,{error:'Không tìm thấy tài khoản.'});if(museAccountId===id&&museContext){await museContext.close().catch(()=>{});museContext=null;musePage=null;museState='disconnected';}accounts.splice(index,1);if(!accounts.some(a=>a.primary))accounts[0].primary=true;if(settings.imageAccountId===id){settings.imageAccountId='';persistSettings()}syncAutomaticWorkerCapacity();persistAccounts();return respond(res,200,{ok:true});
+    try {
+      const id=url.pathname.split('/')[3],index=accounts.findIndex(a=>a.id===id);
+      if(index<0)return respond(res,404,{error:'Không tìm thấy tài khoản.'});
+      if(sideChatCleanup.status==='running')return respond(res,409,{error:'Đợi dọn chat phụ xong rồi xóa tài khoản.'});
+      const account=accounts[index];account.enabled=false;
+      let stoppedJobs=0,reassignedJobs=0;
+      for(const batch of batches.values()){
+        const ownedBatch=batch.accountId===id;
+        if(ownedBatch&&batch.jobs.some(job=>job.status==='Trong hàng đợi')){batch.accountId=null;batch.strictAccount=false;batch.resumeAfterAccountRemoval=true}
+        for(const job of batch.jobs){
+          if(job.accountId===id&&['Đang tạo trên Muse','Đang gửi lên Muse'].includes(job.status)){
+            cancelActiveTask(job);job.status='Lỗi';job.error='Tác vụ dừng vì tài khoản Muse đã bị xóa.';stoppedJobs++;
+            batch.resumeAfterAccountRemoval=true;
+          }else if(job.status==='Trong hàng đợi'&&(job.accountId===id||(!job.accountId&&ownedBatch))){job.accountId=null;reassignedJobs++}
+        }
+      }
+      if(museConnectPromise)await museConnectPromise.catch(()=>{});
+      if(museAccountId===id&&museContext){await museContext.close().catch(()=>{});museContext=null;musePage=null;museState='disconnected'}
+      accounts.splice(index,1);
+      let replacementCreated=false;
+      if(!accounts.some(a=>a.enabled)){const replacementId=crypto.randomUUID().replace(/-/g,'');accounts.push({id:replacementId,name:'Tài khoản Muse mới',enabled:true,primary:true,profileDir:path.join(DATA_ROOT,'.muse-profiles',replacementId),createdAt:new Date().toISOString(),sideChatUrls:[]});replacementCreated=true}
+      const replacement=accounts.find(a=>a.primary&&a.enabled)||accounts.find(a=>a.enabled);
+      for(const remaining of accounts)remaining.primary=remaining===replacement;
+      for(const batch of batches.values())if(batch.accountId===null)batch.accountId=replacement.id;
+      if(museAccountId===id)museAccountId=replacement.id;
+      if(settings.imageAccountId===id){settings.imageAccountId='';persistSettings()}
+      syncAutomaticWorkerCapacity();persistAccounts();persistHistory();resumePausedBatches();
+      return respond(res,200,{ok:true,stoppedJobs,reassignedJobs,replacementCreated});
+    } catch(e){return respond(res,500,{error:e.message})}
   }
   if(req.method==='PUT' && url.pathname==='/api/settings') {
     try {
@@ -707,7 +742,7 @@ const server=http.createServer(async(req,res)=>{
       for(const {job} of selected)if(job.outputPath){const file=outputFileForDeletion(job.outputPath);if(file)files.add(file)}
       const remainingFiles=new Set();for(const batch of batches.values())for(const job of batch.jobs)if(!deletableIds.has(job.id)&&job.outputPath)remainingFiles.add(path.resolve(job.outputPath));
       for(const file of files)if(remainingFiles.has(path.resolve(file)))files.delete(file);
-      for(const {batch,job} of selected){job.cancelRequested=true;job.status='Đã hủy';const child=activeTaskChildren.get(job.id);if(child){if(child.connected)child.send({kind:'cancel'},()=>{});else child.kill();setTimeout(()=>{if(activeTaskChildren.get(job.id)===child)child.kill()},5000).unref()}if(batch.jobs.every(item=>deletableIds.has(item.id)))batch.cancelRequested=true}
+      for(const {batch,job} of selected){cancelActiveTask(job);job.status='Đã hủy';if(batch.jobs.every(item=>deletableIds.has(item.id)))batch.cancelRequested=true}
       for(const file of files)fs.unlinkSync(file);
       const deleted=selected.map(({job})=>job.id);
       for(const batch of batches.values()){batch.jobs=batch.jobs.filter(job=>!deletableIds.has(job.id));if(!batch.jobs.length)batches.delete(batch.id)}
