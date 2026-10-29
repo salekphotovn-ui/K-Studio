@@ -472,6 +472,7 @@ async function downloadLatestVideo(page, prompt, timeoutMs = 15000) {
   return target;
 }
 const activeAccountJobs=new Map();
+const activeTaskChildren=new Map();
 const activeWorkerChildren=new Set();
 function cleanSideChatsForAccount(account){
   return new Promise(resolve=>{
@@ -511,12 +512,13 @@ function runMuseTaskProcess(account,job){
   return new Promise((resolve,reject)=>{
     const child=fork(path.join(ROOT,'muse-task-worker.js'),[],{silent:true});
     activeWorkerChildren.add(child);
+    activeTaskChildren.set(job.id,child);
     let stderr='';
     child.stderr?.on('data',chunk=>{stderr=(stderr+chunk.toString()).slice(-4000)});
     const hardTimeout=((job.type==='Ảnh'?settings.imageTimeout:settings.videoTimeout)+2)*60_000;
     const timer=setTimeout(()=>{child.kill();reject(Object.assign(new Error('Tiến trình Muse vượt quá thời gian chờ.'),{code:'MUSE_WORKER_TIMEOUT'}))},hardTimeout);
     let settled=false;
-    const finish=(error,result)=>{if(settled)return;settled=true;clearTimeout(timer);activeWorkerChildren.delete(child);error?reject(error):resolve(result)};
+    const finish=(error,result)=>{if(settled)return;settled=true;clearTimeout(timer);activeWorkerChildren.delete(child);activeTaskChildren.delete(job.id);error?reject(error):resolve(result)};
     child.once('error',finish);
     child.once('exit',code=>{if(!settled)finish(Object.assign(new Error(stderr||`Tiến trình Muse dừng với mã ${code}.`),{code:'MUSE_WORKER_EXIT'}))});
     child.once('message',result=>{
@@ -537,6 +539,7 @@ async function storeWorkerResult(job,tempPath){
   try{fs.copyFileSync(tempPath,target);fs.unlinkSync(tempPath);job.outputPath=target}
   finally{outputReservations.delete(target)}
   job.outputPath=await cropToAspect(job.outputPath,job.type,parseAspectRatio(job.aspectRatio));
+  if(job.cancelRequested){if(job.outputPath&&fs.existsSync(job.outputPath))fs.unlinkSync(job.outputPath);job.outputPath=null;return}
   finalizeTeamOutput(job);
 }
 async function runMuseBatch(batch) {
@@ -565,16 +568,20 @@ async function runMuseBatch(batch) {
           const tasks=[];
           for(let lane=0;lane<lanes;lane++){
             const job=pending[cursor++];if(!job)break;
-            if(job.status!=='Trong hàng đợi')continue;
+            if(job.status!=='Trong hàng đợi'||job.cancelRequested)continue;
             if(job.outputPath&&fs.existsSync(job.outputPath)&&job.teamOutputBase){job.outputPath=await cropToAspect(job.outputPath,job.type,parseAspectRatio(job.aspectRatio));finalizeTeamOutput(job);job.status='Hoàn tất';job.error=null;job.finishedAt=new Date().toISOString();persistHistory();continue}
             job.status='Đang tạo trên Muse';job.accountId=account.id;job.startedAt=new Date().toISOString();job.worker=laneCounts.slice(0,index).reduce((sum,count)=>sum+count,0)+lane+1;job.lane=lane;job.promptSent=true;job.error=null;job.errorCode=null;tasks.push({job,lane});
           }
           if(!tasks.length){if(cursor>=pending.length)break;continue}
           activeAccountJobs.set(account.id,tasks.map(({job})=>job.id));persistHistory();
           try{
-            const results=[{jobId:tasks[0].job.id,lane:0,ok:true,...await runMuseTaskProcess(account,{...tasks[0].job,lane:0})}];
+            let workerResult;
+            try{workerResult=await runMuseTaskProcess(account,tasks[0].job)}
+            catch(error){workerResult={ok:false,error:error.message,code:error.code||'MUSE_WORKER_EXIT'}}
+            const results=[{jobId:tasks[0].job.id,lane:0,...workerResult}];
             for(const {job,lane} of tasks){
               const result=results.find(item=>item.jobId===job.id);
+              if(job.cancelRequested){if(result?.tempPath&&fs.existsSync(result.tempPath))fs.unlinkSync(result.tempPath);continue}
               if(!result?.ok){
                 const error=Object.assign(new Error(result?.error||'Muse không trả kết quả.'),{code:result?.code||'KSTUDIO_ERROR'});
                 if(error.code==='MUSE_QUOTA'){account.quotaBlockedAt=new Date().toISOString();account.quotaReason=error.message;persistAccounts()}
@@ -583,8 +590,8 @@ async function runMuseBatch(batch) {
                 else{job.status='Lỗi';job.error=error.message;job.errorCode=error.code}
                 continue;
               }
-              try{await storeWorkerResult(job,result.tempPath);applyWorkerQuota(account,result.quota);job.status='Hoàn tất';job.error=null;job.errorCode=null;job.finishedAt=new Date().toISOString()}
-              catch(error){job.status='Lỗi';job.error=error.message;job.errorCode=error.code||'KSTUDIO_ERROR'}
+              try{await storeWorkerResult(job,result.tempPath);if(job.cancelRequested)continue;applyWorkerQuota(account,result.quota);job.status='Hoàn tất';job.error=null;job.errorCode=null;job.finishedAt=new Date().toISOString()}
+              catch(error){if(job.cancelRequested)continue;job.status='Lỗi';job.error=error.message;job.errorCode=error.code||'KSTUDIO_ERROR'}
             }
           }finally{activeAccountJobs.delete(account.id);persistHistory()}
         }
@@ -692,19 +699,18 @@ const server=http.createServer(async(req,res)=>{
       const data=await bodyJson(req),ids=Array.isArray(data.ids)?Array.from(new Set(data.ids.map(String))):[];
       if(!ids.length)return respond(res,400,{error:'Chưa chọn tác vụ để xóa.'});
       if(ids.length>20000)return respond(res,400,{error:'Chỉ xóa tối đa 20.000 tác vụ mỗi lần.'});
-      const activeStatuses=new Set(['Đang tạo trên Muse','Đang gửi lên Muse']);
       const byId=new Map();for(const batch of batches.values())for(const job of batch.jobs)byId.set(job.id,{batch,job});
       const selected=ids.map(id=>byId.get(id)).filter(Boolean);
-      const isActive=item=>runningBatches.has(item.batch.id)||scheduledBatches.has(item.batch.id)||activeStatuses.has(item.job.status);
-      const deletable=selected.filter(item=>!isActive(item)),deletableIds=new Set(deletable.map(item=>item.job.id)),skipped=ids.filter(id=>!byId.has(id)||isActive(byId.get(id)));
+      const deletableIds=new Set(selected.map(item=>item.job.id)),skipped=ids.filter(id=>!byId.has(id));
       // Validate every result path before changing history or removing any files.
       const files=new Set();
-      for(const {job} of deletable)if(job.outputPath){const file=outputFileForDeletion(job.outputPath);if(file)files.add(file)}
+      for(const {job} of selected)if(job.outputPath){const file=outputFileForDeletion(job.outputPath);if(file)files.add(file)}
       const remainingFiles=new Set();for(const batch of batches.values())for(const job of batch.jobs)if(!deletableIds.has(job.id)&&job.outputPath)remainingFiles.add(path.resolve(job.outputPath));
       for(const file of files)if(remainingFiles.has(path.resolve(file)))files.delete(file);
+      for(const {batch,job} of selected){job.cancelRequested=true;job.status='Đã hủy';const child=activeTaskChildren.get(job.id);if(child){if(child.connected)child.send({kind:'cancel'},()=>{});else child.kill();setTimeout(()=>{if(activeTaskChildren.get(job.id)===child)child.kill()},5000).unref()}if(batch.jobs.every(item=>deletableIds.has(item.id)))batch.cancelRequested=true}
       for(const file of files)fs.unlinkSync(file);
-      const deleted=[];
-      for(const {batch,job} of deletable){const index=batch.jobs.findIndex(item=>item.id===job.id);if(index>=0){batch.jobs.splice(index,1);deleted.push(job.id);if(!batch.jobs.length)batches.delete(batch.id)}}
+      const deleted=selected.map(({job})=>job.id);
+      for(const batch of batches.values()){batch.jobs=batch.jobs.filter(job=>!deletableIds.has(job.id));if(!batch.jobs.length)batches.delete(batch.id)}
       persistHistory();return respond(res,200,{ok:true,deleted,skipped,removedFiles:files.size});
     } catch(e) { return respond(res,500,{error:e.message}); }
   }

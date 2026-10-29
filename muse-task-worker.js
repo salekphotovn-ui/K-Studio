@@ -2,6 +2,7 @@ const fs = require('node:fs');
 const path = require('node:path');
 const { chromium } = require('playwright-core');
 const { readMuseQuota } = require('./muse-quota');
+let activeContext=null,cancelRequested=false;
 
 async function responseForPrompt(page, prompt) {
   return page.evaluate(promptText => {
@@ -85,6 +86,8 @@ async function run(payload) {
     viewport: { width: 1160, height: 740 },
     acceptDownloads: true,
   });
+  activeContext=context;
+  if(cancelRequested){await context.close().catch(()=>{});throw new Error('Tác vụ đã bị hủy.')}
   try {
     const page = context.pages()[0] || await context.newPage();
     await page.goto(payload.chatUrl || 'https://muse.ai/', { waitUntil: 'domcontentloaded' });
@@ -143,10 +146,12 @@ async function run(payload) {
     return { ok: true, tempPath, quota, chatUrl: page.url() };
   } finally {
     await context.close().catch(() => {});
+    activeContext=null;
   }
 }
 
 process.on('message', async payload => {
+  if(payload?.kind==='cancel'){cancelRequested=true;await activeContext?.close().catch(()=>{});return}
   try { process.send(await run(payload)); }
   catch (error) { process.send({ ok: false, error: error.message, code: error.code || 'KSTUDIO_ERROR' }); }
   finally { process.disconnect(); }
