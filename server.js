@@ -46,10 +46,12 @@ const MAX_WORKERS_PER_ACCOUNT = 1;
 const DEFAULT_SETTINGS = { outputDir: path.join(DATA_ROOT, 'output'), imageWorkers: 1, videoWorkers: 1, workerCountMode: 'auto', imageTimeout: 6, videoTimeout: 12, promptSeparator: '', allowedDomainsEnabled: true, allowedDomains: 'huggingface.co', autoReservePercent: 5, imageAccountId: '', videoAccountMode: 'all' };
 const outputReservations = new Set();
 let accounts = [{ id:'default', name:'Tài khoản Muse', enabled:true, primary:true, profileDir:MUSE_PROFILE, createdAt:new Date().toISOString() }];
-const accountSources=[ACCOUNTS_FILE,ACCOUNTS_BACKUP_FILE,path.join(ROOT,'accounts.json')].map(source=>{
-  try{const saved=JSON.parse(fs.readFileSync(source,'utf8'));return Array.isArray(saved)&&saved.length?{source,saved}:null}catch{return null}
-}).filter(Boolean).sort((a,b)=>b.saved.length-a.saved.length);
-if(accountSources.length)accounts=accountSources[0].saved;
+for(const source of [ACCOUNTS_FILE,ACCOUNTS_BACKUP_FILE,path.join(ROOT,'accounts.json')]){
+  try{
+    const saved=JSON.parse(fs.readFileSync(source,'utf8'));
+    if(Array.isArray(saved)&&saved.length){accounts=saved;break}
+  }catch{}
+}
 const initialPrimaryIndex=accounts.findIndex(account=>account.primary);
 if(initialPrimaryIndex>0)accounts.unshift(accounts.splice(initialPrimaryIndex,1)[0]);
 for(const account of accounts)account.profileDir=account.id==='default'?MUSE_PROFILE:path.join(DATA_ROOT,'.muse-profiles',account.id);
